@@ -191,17 +191,29 @@ public class PhysicalPlanTranslator extends DefaultPlanVisitor<PlanFragment, Pla
         // 3. generate output tuple
         List<Slot> slotList = Lists.newArrayList();
         TupleDescriptor outputTupleDesc;
-        if (aggregate.getAggPhase() == AggPhase.GLOBAL) {
+        if (aggregate.getAggPhase() == AggPhase.LOCAL) {
+            outputTupleDesc = generateTupleDesc(aggregate.getOutput(), null, context);
+        } else if ((aggregate.getAggPhase() == AggPhase.GLOBAL && aggregate.isFinalPhase())
+                || aggregate.getAggPhase() == AggPhase.DISTINCT_LOCAL) {
             slotList.addAll(groupSlotList);
             slotList.addAll(aggFunctionOutput);
             outputTupleDesc = generateTupleDesc(slotList, null, context);
         } else {
-            outputTupleDesc = generateTupleDesc(aggregate.getOutput(), null, context);
+            // In the distinct agg scenario, global shares local's desc
+            AggregationNode localAggNode = (AggregationNode) inputPlanFragment.getPlanRoot().getChild(0);
+            outputTupleDesc = localAggNode.getAggInfo().getOutputTupleDesc();
         }
 
         if (aggregate.getAggPhase() == AggPhase.GLOBAL) {
             for (FunctionCallExpr execAggregateFunction : execAggregateFunctions) {
                 execAggregateFunction.setMergeForNereids(true);
+            }
+        }
+        if (aggregate.getAggPhase() == AggPhase.DISTINCT_LOCAL) {
+            for (FunctionCallExpr execAggregateFunction : execAggregateFunctions) {
+                if (!execAggregateFunction.isDistinct()) {
+                    execAggregateFunction.setMergeForNereids(true);
+                }
             }
         }
         AggregateInfo aggInfo = AggregateInfo.create(execGroupingExpressions, execAggregateFunctions, outputTupleDesc,
@@ -216,6 +228,7 @@ public class PhysicalPlanTranslator extends DefaultPlanVisitor<PlanFragment, Pla
                 aggregationNode.setIntermediateTuple();
                 break;
             case GLOBAL:
+            case DISTINCT_LOCAL:
                 if (currentFragment.getPlanRoot() instanceof ExchangeNode) {
                     ExchangeNode exchangeNode = (ExchangeNode) currentFragment.getPlanRoot();
                     currentFragment = new PlanFragment(context.nextFragmentId(), exchangeNode, mergePartition);
@@ -318,6 +331,12 @@ public class PhysicalPlanTranslator extends DefaultPlanVisitor<PlanFragment, Pla
 
         Utils.execWithUncheckedException(olapScanNode::init);
         context.addScanNode(olapScanNode);
+        // translate runtime filter
+        context.getRuntimeTranslator().ifPresent(
+                runtimeFilterGenerator -> runtimeFilterGenerator.getTargetOnScanNode(olapScan.getId()).forEach(
+                        expr -> runtimeFilterGenerator.translateRuntimeFilterTarget(expr, olapScanNode, context)
+                )
+        );
         // Create PlanFragment
         DataPartition dataPartition = DataPartition.RANDOM;
         if (olapScan.getDistributionSpec() instanceof DistributionSpecHash) {
@@ -509,6 +528,10 @@ public class PhysicalPlanTranslator extends DefaultPlanVisitor<PlanFragment, Pla
         hashJoinNode.setvIntermediateTupleDescList(Lists.newArrayList(outputDescriptor));
         hashJoinNode.setvOutputTupleDesc(outputDescriptor);
         hashJoinNode.setvSrcToOutputSMap(srcToOutput);
+        // translate runtime filter
+        context.getRuntimeTranslator().ifPresent(runtimeFilterTranslator -> runtimeFilterTranslator
+                .getRuntimeFilterOfHashJoinNode(physicalHashJoin)
+                .forEach(filter -> runtimeFilterTranslator.createLegacyRuntimeFilter(filter, hashJoinNode, context)));
         return currentFragment;
     }
 
