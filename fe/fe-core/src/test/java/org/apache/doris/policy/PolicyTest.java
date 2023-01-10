@@ -27,6 +27,7 @@ import org.apache.doris.analysis.UserIdentity;
 import org.apache.doris.catalog.AccessPrivilege;
 import org.apache.doris.catalog.Env;
 import org.apache.doris.common.AnalysisException;
+import org.apache.doris.common.Config;
 import org.apache.doris.common.DdlException;
 import org.apache.doris.common.ExceptionChecker;
 import org.apache.doris.common.FeConstants;
@@ -51,6 +52,7 @@ public class PolicyTest extends TestWithFeService {
 
     @Override
     protected void runBeforeAll() throws Exception {
+        Config.enable_storage_policy = true;
         FeConstants.runningUnitTest = true;
         createDatabase("test");
         useDatabase("test");
@@ -189,7 +191,7 @@ public class PolicyTest extends TestWithFeService {
         String subQuerySql = "select * from table2 where k1 in (select k1 from table1)";
         Assertions.assertTrue(getSQLPlanOrErrorMsg(subQuerySql).contains("PREDICATES: `k1` = 1, `k2` = 1"));
         String aliasSql = "select * from table1 t1 join table2 t2 on t1.k1=t2.k1";
-        Assertions.assertTrue(getSQLPlanOrErrorMsg(aliasSql).contains("PREDICATES: `k1` = 1, `k2` = 1"));
+        Assertions.assertTrue(getSQLPlanOrErrorMsg(aliasSql).contains("PREDICATES: `t1`.`k1` = 1, `t1`.`k2` = 1"));
         dropPolicy("DROP ROW POLICY test_row_policy1 ON test.table1");
         dropPolicy("DROP ROW POLICY test_row_policy2 ON test.table1");
     }
@@ -200,6 +202,7 @@ public class PolicyTest extends TestWithFeService {
         String policyName = "policy_name";
         long dbId = 10;
         UserIdentity user = new UserIdentity("test_policy", "%");
+        user.analyze(SystemInfoService.DEFAULT_CLUSTER);
         String originStmt = "CREATE ROW POLICY test_row_policy ON test.table1"
                 + " AS PERMISSIVE TO test_policy USING (k1 = 1)";
         long tableId = 100;

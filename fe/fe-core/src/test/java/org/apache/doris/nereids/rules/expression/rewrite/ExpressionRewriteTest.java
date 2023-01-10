@@ -17,30 +17,49 @@
 
 package org.apache.doris.nereids.rules.expression.rewrite;
 
-import org.apache.doris.nereids.parser.NereidsParser;
 import org.apache.doris.nereids.rules.expression.rewrite.rules.BetweenToCompoundRule;
 import org.apache.doris.nereids.rules.expression.rewrite.rules.DistinctPredicatesRule;
 import org.apache.doris.nereids.rules.expression.rewrite.rules.ExtractCommonFactorRule;
 import org.apache.doris.nereids.rules.expression.rewrite.rules.InPredicateToEqualToRule;
 import org.apache.doris.nereids.rules.expression.rewrite.rules.NormalizeBinaryPredicatesRule;
 import org.apache.doris.nereids.rules.expression.rewrite.rules.SimplifyCastRule;
+import org.apache.doris.nereids.rules.expression.rewrite.rules.SimplifyComparisonPredicate;
 import org.apache.doris.nereids.rules.expression.rewrite.rules.SimplifyNotExprRule;
+import org.apache.doris.nereids.trees.expressions.Cast;
+import org.apache.doris.nereids.trees.expressions.EqualTo;
 import org.apache.doris.nereids.trees.expressions.Expression;
+import org.apache.doris.nereids.trees.expressions.GreaterThan;
+import org.apache.doris.nereids.trees.expressions.LessThan;
+import org.apache.doris.nereids.trees.expressions.literal.BigIntLiteral;
+import org.apache.doris.nereids.trees.expressions.literal.CharLiteral;
+import org.apache.doris.nereids.trees.expressions.literal.DateLiteral;
+import org.apache.doris.nereids.trees.expressions.literal.DateTimeLiteral;
+import org.apache.doris.nereids.trees.expressions.literal.DateTimeV2Literal;
+import org.apache.doris.nereids.trees.expressions.literal.DateV2Literal;
+import org.apache.doris.nereids.trees.expressions.literal.DecimalLiteral;
+import org.apache.doris.nereids.trees.expressions.literal.IntegerLiteral;
+import org.apache.doris.nereids.trees.expressions.literal.SmallIntLiteral;
+import org.apache.doris.nereids.trees.expressions.literal.StringLiteral;
+import org.apache.doris.nereids.trees.expressions.literal.TinyIntLiteral;
+import org.apache.doris.nereids.trees.expressions.literal.VarcharLiteral;
+import org.apache.doris.nereids.types.DateTimeV2Type;
+import org.apache.doris.nereids.types.DecimalV2Type;
+import org.apache.doris.nereids.types.StringType;
+import org.apache.doris.nereids.types.VarcharType;
 
 import com.google.common.collect.ImmutableList;
-import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
+
+import java.math.BigDecimal;
 
 /**
  * all expr rewrite rule test case.
  */
-public class ExpressionRewriteTest {
-    private static final NereidsParser PARSER = new NereidsParser();
-    private ExpressionRuleExecutor executor;
+public class ExpressionRewriteTest extends ExpressionRewriteTestHelper {
 
     @Test
     public void testNotRewrite() {
-        executor = new ExpressionRuleExecutor(SimplifyNotExprRule.INSTANCE);
+        executor = new ExpressionRuleExecutor(ImmutableList.of(SimplifyNotExprRule.INSTANCE));
 
         assertRewrite("not x", "not x");
         assertRewrite("not not x", "x");
@@ -65,7 +84,7 @@ public class ExpressionRewriteTest {
 
     @Test
     public void testNormalizeExpressionRewrite() {
-        executor = new ExpressionRuleExecutor(NormalizeBinaryPredicatesRule.INSTANCE);
+        executor = new ExpressionRuleExecutor(ImmutableList.of(NormalizeBinaryPredicatesRule.INSTANCE));
 
         assertRewrite("1 = 1", "1 = 1");
         assertRewrite("2 > x", "x < 2");
@@ -77,7 +96,7 @@ public class ExpressionRewriteTest {
 
     @Test
     public void testDistinctPredicatesRewrite() {
-        executor = new ExpressionRuleExecutor(DistinctPredicatesRule.INSTANCE);
+        executor = new ExpressionRuleExecutor(ImmutableList.of(DistinctPredicatesRule.INSTANCE));
 
         assertRewrite("a = 1", "a = 1");
         assertRewrite("a = 1 and a = 1", "a = 1");
@@ -89,7 +108,7 @@ public class ExpressionRewriteTest {
 
     @Test
     public void testExtractCommonFactorRewrite() {
-        executor = new ExpressionRuleExecutor(ExtractCommonFactorRule.INSTANCE);
+        executor = new ExpressionRuleExecutor(ImmutableList.of(ExtractCommonFactorRule.INSTANCE));
 
         assertRewrite("a", "a");
 
@@ -142,7 +161,8 @@ public class ExpressionRewriteTest {
 
     @Test
     public void testBetweenToCompoundRule() {
-        executor = new ExpressionRuleExecutor(ImmutableList.of(BetweenToCompoundRule.INSTANCE, SimplifyNotExprRule.INSTANCE));
+        executor = new ExpressionRuleExecutor(ImmutableList.of(BetweenToCompoundRule.INSTANCE,
+                SimplifyNotExprRule.INSTANCE));
 
         assertRewrite("a between c and d", "(a >= c) and (a <= d)");
         assertRewrite("a not between c and d)", "(a < c) or (a > d)");
@@ -183,12 +203,102 @@ public class ExpressionRewriteTest {
         // deduplicate inside
         assertRewrite("CAST(CAST('str' AS varchar) AS double)", "CAST('str' AS double)");
         assertRewrite("CAST(CAST(1 AS tinyint) AS double)", "CAST(1 AS double)");
+
+        // string literal
+        assertRewrite(new Cast(new CharLiteral("123", 3), VarcharType.createVarcharType(10)),
+                new VarcharLiteral("123", 10));
+        assertRewrite(new Cast(new VarcharLiteral("123", 3), VarcharType.createVarcharType(10)),
+                new VarcharLiteral("123", 10));
+        assertRewrite(new Cast(new CharLiteral("123", 3), StringType.INSTANCE), new StringLiteral("123"));
+        assertRewrite(new Cast(new VarcharLiteral("123", 3), StringType.INSTANCE), new StringLiteral("123"));
+
+        // decimal literal
+        assertRewrite(new Cast(new TinyIntLiteral((byte) 1), DecimalV2Type.createDecimalV2Type(15, 9)),
+                new DecimalLiteral(new BigDecimal(1)));
+        assertRewrite(new Cast(new SmallIntLiteral((short) 1), DecimalV2Type.createDecimalV2Type(15, 9)),
+                new DecimalLiteral(new BigDecimal(1)));
+        assertRewrite(new Cast(new IntegerLiteral(1), DecimalV2Type.createDecimalV2Type(15, 9)),
+                new DecimalLiteral(new BigDecimal(1)));
+        assertRewrite(new Cast(new BigIntLiteral(1L), DecimalV2Type.createDecimalV2Type(15, 9)),
+                new DecimalLiteral(new BigDecimal(1)));
     }
 
-    private void assertRewrite(String expression, String expected) {
-        Expression needRewriteExpression = PARSER.parseExpression(expression);
-        Expression expectedExpression = PARSER.parseExpression(expected);
-        Expression rewrittenExpression = executor.rewrite(needRewriteExpression);
-        Assertions.assertEquals(expectedExpression, rewrittenExpression);
+    @Test
+    public void testSimplifyComparisonPredicateRule() {
+        executor = new ExpressionRuleExecutor(ImmutableList.of(SimplifyComparisonPredicate.INSTANCE));
+
+        Expression dtv2 = new DateTimeV2Literal(1, 1, 1, 1, 1, 1);
+        Expression dt = new DateTimeLiteral(1, 1, 1, 1, 1, 1);
+        Expression dv2 = new DateV2Literal(1, 1, 1);
+        Expression dv2PlusOne = new DateV2Literal(1, 1, 2);
+        Expression d = new DateLiteral(1, 1, 1);
+        Expression dPlusOne = new DateLiteral(1, 1, 2);
+
+        // DateTimeV2 -> DateTime
+        assertRewrite(
+                new GreaterThan(new Cast(dt, DateTimeV2Type.SYSTEM_DEFAULT), dtv2),
+                new GreaterThan(dt, dt));
+
+        // DateTimeV2 -> DateV2
+        assertRewrite(
+                new GreaterThan(new Cast(dv2, DateTimeV2Type.SYSTEM_DEFAULT), dtv2),
+                new GreaterThan(dv2, dv2));
+        assertRewrite(
+                new LessThan(new Cast(dv2, DateTimeV2Type.SYSTEM_DEFAULT), dtv2),
+                new LessThan(dv2, dv2PlusOne));
+        assertRewrite(
+                new EqualTo(new Cast(dv2, DateTimeV2Type.SYSTEM_DEFAULT), dtv2),
+                new EqualTo(new Cast(dv2, DateTimeV2Type.SYSTEM_DEFAULT), dtv2));
+
+        // DateTime -> DateV2
+        assertRewrite(
+                new GreaterThan(new Cast(dv2, DateTimeV2Type.SYSTEM_DEFAULT), dt),
+                new GreaterThan(dv2, dv2));
+        assertRewrite(
+                new LessThan(new Cast(dv2, DateTimeV2Type.SYSTEM_DEFAULT), dt),
+                new LessThan(dv2, dv2PlusOne));
+        assertRewrite(
+                new EqualTo(new Cast(dv2, DateTimeV2Type.SYSTEM_DEFAULT), dt),
+                new EqualTo(new Cast(dv2, DateTimeV2Type.SYSTEM_DEFAULT), dt));
+
+        // DateTimeV2 -> Date
+        assertRewrite(
+                new GreaterThan(new Cast(d, DateTimeV2Type.SYSTEM_DEFAULT), dtv2),
+                new GreaterThan(d, d));
+        assertRewrite(
+                new LessThan(new Cast(d, DateTimeV2Type.SYSTEM_DEFAULT), dtv2),
+                new LessThan(d, dPlusOne));
+        assertRewrite(
+                new EqualTo(new Cast(d, DateTimeV2Type.SYSTEM_DEFAULT), dtv2),
+                new EqualTo(new Cast(d, DateTimeV2Type.SYSTEM_DEFAULT), dtv2));
+
+        // DateTime -> Date
+        assertRewrite(
+                new GreaterThan(new Cast(d, DateTimeV2Type.SYSTEM_DEFAULT), dt),
+                new GreaterThan(d, d));
+        assertRewrite(
+                new LessThan(new Cast(d, DateTimeV2Type.SYSTEM_DEFAULT), dt),
+                new LessThan(d, dPlusOne));
+        assertRewrite(
+                new EqualTo(new Cast(d, DateTimeV2Type.SYSTEM_DEFAULT), dt),
+                new EqualTo(new Cast(d, DateTimeV2Type.SYSTEM_DEFAULT), dt));
+
+        // DateV2 -> Date
+        assertRewrite(
+                new GreaterThan(new Cast(d, DateTimeV2Type.SYSTEM_DEFAULT), dv2),
+                new GreaterThan(d, d));
+
+        // test hour, minute and second all zero
+        Expression dtv2AtZeroClock = new DateTimeV2Literal(1, 1, 1, 0, 0, 0);
+        assertRewrite(
+                new GreaterThan(new Cast(dv2, DateTimeV2Type.SYSTEM_DEFAULT), dtv2AtZeroClock),
+                new GreaterThan(dv2, dv2));
+        assertRewrite(
+                new LessThan(new Cast(dv2, DateTimeV2Type.SYSTEM_DEFAULT), dtv2AtZeroClock),
+                new LessThan(dv2, dv2));
+        assertRewrite(
+                new EqualTo(new Cast(dv2, DateTimeV2Type.SYSTEM_DEFAULT), dtv2AtZeroClock),
+                new EqualTo(dv2, dv2));
+
     }
 }

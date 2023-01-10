@@ -70,19 +70,16 @@ void ArrowReaderWrap::close() {
 }
 
 Status ArrowReaderWrap::column_indices() {
-    DCHECK(_num_of_columns_from_file <= _file_slot_descs.size());
     _include_column_ids.clear();
-    for (int i = 0; i < _num_of_columns_from_file; i++) {
-        auto slot_desc = _file_slot_descs.at(i);
+    _include_cols.clear();
+    for (auto& slot_desc : _file_slot_descs) {
         // Get the Column Reader for the boolean column
         auto iter = _map_column.find(slot_desc->col_name());
         if (iter != _map_column.end()) {
             _include_column_ids.emplace_back(iter->second);
+            _include_cols.push_back(slot_desc->col_name());
         } else {
-            std::stringstream str_error;
-            str_error << "Invalid Column Name:" << slot_desc->col_name();
-            LOG(WARNING) << str_error.str();
-            return Status::InvalidArgument(str_error.str());
+            _missing_cols.push_back(slot_desc->col_name());
         }
     }
     return Status::OK();
@@ -101,13 +98,16 @@ int ArrowReaderWrap::get_column_index(std::string column_name) {
     }
 }
 
-Status ArrowReaderWrap::get_next_block(vectorized::Block* block, bool* eof) {
+Status ArrowReaderWrap::get_next_block(vectorized::Block* block, size_t* read_row, bool* eof) {
     size_t rows = 0;
+    bool tmp_eof = false;
     do {
         if (_batch == nullptr || _arrow_batch_cur_idx >= _batch->num_rows()) {
-            RETURN_IF_ERROR(next_batch(&_batch, eof));
-            if (*eof) {
-                return Status::OK();
+            RETURN_IF_ERROR(next_batch(&_batch, &tmp_eof));
+            // We need to make sure the eof is set to true iff block is empty.
+            if (tmp_eof) {
+                *eof = (rows == 0);
+                break;
             }
         }
 
@@ -128,7 +128,8 @@ Status ArrowReaderWrap::get_next_block(vectorized::Block* block, bool* eof) {
         }
         rows += num_elements;
         _arrow_batch_cur_idx += num_elements;
-    } while (!(*eof) && rows < _state->batch_size());
+    } while (!tmp_eof && rows < _state->batch_size());
+    *read_row = rows;
     return Status::OK();
 }
 
@@ -137,8 +138,8 @@ Status ArrowReaderWrap::next_batch(std::shared_ptr<arrow::RecordBatch>* batch, b
     while (!_closed && _queue.empty()) {
         if (_batch_eof) {
             _include_column_ids.clear();
+            _include_cols.clear();
             *eof = true;
-            _batch_eof = false;
             return Status::OK();
         }
         _queue_reader_cond.wait_for(lock, std::chrono::seconds(1));

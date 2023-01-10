@@ -135,6 +135,9 @@ abc123
 abc123
 
 -- !sql --
+Abc123abc Abc.Abc,?|Abc
+
+-- !sql --
 Hello
 
 -- !sql --
@@ -183,6 +186,15 @@ true
 false
 
 -- !sql --
+false
+
+-- !sql --
+false
+
+-- !sql --
+true
+
+-- !sql --
 aaa
 
 -- !sql --
@@ -201,6 +213,9 @@ aaa
 https://doris.apache.org
 
 -- !sql --
+https://doris.apache.org:9090
+
+-- !sql --
 olleh
 
 -- !sql --
@@ -208,6 +223,39 @@ hello
 
 -- !sql --
 world
+
+-- !sql --
+\\N
+
+-- !sql --
+world
+
+-- !sql --
+hello
+
+-- !sql --
+\\N
+
+-- !sql --
+\\N
+
+-- !sql --
+abc
+
+-- !sql --
+#xyz
+
+-- !sql --
+\\N
+
+-- !sql --
+xyz
+
+-- !sql --
+123#
+
+-- !sql --
+\\N
 
 -- !sql --
 true
@@ -236,3 +284,86 @@ c1
 -- !sql --
 bc
 
+-- !sql --
+
+
+-- !sql --
+
+
+-- !sql --
+a
+
+-- !sql --
+
+
+-- !sql --
+a
+
+-- !sql --
+
+
+-- !sql --
+
+
+-- !sql --
+tNEW-STRorigin str
+
+-- !sql --
+d***is
+
+-- !sql --
+hello
+
+-- !sql --
+hello world
+
+-- !sql --
+hello world
+
+-- !sql --
+world
+
+-- !sql --
+hello world
+
+-- !sql --
+hello world
+
+-- !sql --
+prefix__string2
+
+-- !sql --
+prefix_
+
+-- !sql --
+prefix_string2
+
+-- !sql --
+\N
+
+-- !sql --
+\N
+
+-- !sql --
+\N
+
+-- !sql --
+prefix_string
+
+-- !sql --
+\N
+
+-- !sql --
+hello
+
+-- !sql --
+doris
+
+-- !sql --
+\N
+
+-- !sql --
+tNEW-STRorigin str
+
+-- !sql --
+d***is

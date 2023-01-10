@@ -186,7 +186,7 @@ TEST(VTimestampFunctionsTest, timediff_test) {
             {{std::string("2019-00-18 12:00:00"), std::string("2019-07-18 13:01:02")}, Null()},
             {{std::string("2019-07-18 12:00:00"), std::string("2019-07-00 13:01:02")}, Null()}};
 
-    check_function<DataTypeFloat64, true>(func_name, input_types, data_set);
+    check_function<DataTypeTime, true>(func_name, input_types, data_set);
 }
 
 TEST(VTimestampFunctionsTest, date_format_test) {
@@ -849,7 +849,7 @@ TEST(VTimestampFunctionsTest, timediff_v2_test) {
                             {{std::string("2019-00-18"), std::string("2019-07-18")}, Null()},
                             {{std::string("2019-07-18"), std::string("2019-07-00")}, Null()}};
 
-        check_function<DataTypeFloat64, true>(func_name, input_types, data_set);
+        check_function<DataTypeTime, true>(func_name, input_types, data_set);
     }
 
     {
@@ -860,7 +860,7 @@ TEST(VTimestampFunctionsTest, timediff_v2_test) {
                             {{std::string("2019-00-18"), std::string("2019-07-18")}, Null()},
                             {{std::string("2019-07-18"), std::string("2019-07-00")}, Null()}};
 
-        check_function<DataTypeFloat64, true>(func_name, input_types, data_set);
+        check_function<DataTypeTime, true>(func_name, input_types, data_set);
     }
 
     {
@@ -871,7 +871,7 @@ TEST(VTimestampFunctionsTest, timediff_v2_test) {
                             {{std::string("2019-00-18"), std::string("2019-07-18")}, Null()},
                             {{std::string("2019-07-18"), std::string("2019-07-00")}, Null()}};
 
-        check_function<DataTypeFloat64, true>(func_name, input_types, data_set);
+        check_function<DataTypeTime, true>(func_name, input_types, data_set);
     }
 
     {
@@ -883,7 +883,7 @@ TEST(VTimestampFunctionsTest, timediff_v2_test) {
                 {{std::string("2019-00-18 00:00:00"), std::string("2019-07-18")}, Null()},
                 {{std::string("2019-07-18 00:00:00"), std::string("2019-07-00")}, Null()}};
 
-        check_function<DataTypeFloat64, true>(func_name, input_types, data_set);
+        check_function<DataTypeTime, true>(func_name, input_types, data_set);
     }
 
     {
@@ -895,7 +895,7 @@ TEST(VTimestampFunctionsTest, timediff_v2_test) {
                 {{std::string("2019-00-18"), std::string("2019-07-18 00:00:00")}, Null()},
                 {{std::string("2019-07-18"), std::string("2019-07-00 00:00:00")}, Null()}};
 
-        check_function<DataTypeFloat64, true>(func_name, input_types, data_set);
+        check_function<DataTypeTime, true>(func_name, input_types, data_set);
     }
     {
         InputTypeSet input_types = {TypeIndex::DateTimeV2, TypeIndex::DateTimeV2};
@@ -906,7 +906,7 @@ TEST(VTimestampFunctionsTest, timediff_v2_test) {
                 {{std::string("2019-00-18 00:00:00"), std::string("2019-07-18 00:00:00")}, Null()},
                 {{std::string("2019-07-18 00:00:00"), std::string("2019-07-00 00:00:00")}, Null()}};
 
-        check_function<DataTypeFloat64, true>(func_name, input_types, data_set);
+        check_function<DataTypeTime, true>(func_name, input_types, data_set);
     }
 
     {
@@ -918,7 +918,7 @@ TEST(VTimestampFunctionsTest, timediff_v2_test) {
                 {{std::string("2019-00-18 00:00:00"), std::string("2019-07-18")}, Null()},
                 {{std::string("2019-07-18 00:00:00"), std::string("2019-07-00")}, Null()}};
 
-        check_function<DataTypeFloat64, true>(func_name, input_types, data_set);
+        check_function<DataTypeTime, true>(func_name, input_types, data_set);
     }
 
     {
@@ -930,7 +930,7 @@ TEST(VTimestampFunctionsTest, timediff_v2_test) {
                 {{std::string("2019-00-18"), std::string("2019-07-18 00:00:00")}, Null()},
                 {{std::string("2019-07-18"), std::string("2019-07-00 00:00:00")}, Null()}};
 
-        check_function<DataTypeFloat64, true>(func_name, input_types, data_set);
+        check_function<DataTypeTime, true>(func_name, input_types, data_set);
     }
 
     {
@@ -942,7 +942,7 @@ TEST(VTimestampFunctionsTest, timediff_v2_test) {
                 {{std::string("2019-00-18 00:00:00"), std::string("2019-07-18 00:00:00")}, Null()},
                 {{std::string("2019-07-18 00:00:00"), std::string("2019-07-00 00:00:00")}, Null()}};
 
-        check_function<DataTypeFloat64, true>(func_name, input_types, data_set);
+        check_function<DataTypeTime, true>(func_name, input_types, data_set);
     }
 
     {
@@ -957,7 +957,7 @@ TEST(VTimestampFunctionsTest, timediff_v2_test) {
                 {{std::string("2019-07-18 00:00:00.123"), std::string("2019-07-00 00:00:00")},
                  Null()}};
 
-        check_function<DataTypeFloat64, true>(func_name, input_types, data_set);
+        check_function<DataTypeTime, true>(func_name, input_types, data_set);
     }
 }
 
@@ -1617,6 +1617,47 @@ TEST(VTimestampFunctionsTest, dayname_test) {
                             {{std::string("2020-01-00 00:00:11.123")}, Null()}};
 
         check_function<DataTypeString, true>(func_name, input_types, data_set);
+    }
+}
+
+TEST(VTimestampFunctionsTest, datetrunc_test) {
+    std::string func_name = "date_trunc";
+    {
+        InputTypeSet input_types = {TypeIndex::DateTime, TypeIndex::String};
+
+        DataSet data_set = {{{std::string("2022-10-08 11:44:23"), std::string("second")},
+                             str_to_date_time("2022-10-08 11:44:23")},
+                            {{std::string("2022-10-08 11:44:23"), std::string("minute")},
+                             str_to_date_time("2022-10-08 11:44:00")},
+                            {{std::string("2022-10-08 11:44:23"), std::string("hour")},
+                             str_to_date_time("2022-10-08 11:00:00")},
+                            {{std::string("2022-10-08 11:44:23"), std::string("day")},
+                             str_to_date_time("2022-10-08 00:00:00")},
+                            {{std::string("2022-10-08 11:44:23"), std::string("month")},
+                             str_to_date_time("2022-10-01 00:00:00")},
+                            {{std::string("2022-10-08 11:44:23"), std::string("year")},
+                             str_to_date_time("2022-01-01 00:00:00")}};
+
+        check_function<DataTypeDateTime, true>(func_name, input_types, data_set);
+    }
+
+    {
+        InputTypeSet input_types = {TypeIndex::DateTimeV2, TypeIndex::String};
+
+        DataSet data_set = {{{std::string("2022-10-08 11:44:23.123"), std::string("second")},
+                             str_to_datetime_v2("2022-10-08 11:44:23.000", "%Y-%m-%d %H:%i:%s.%f")},
+                            {{std::string("2022-10-08 11:44:23"), std::string("minute")},
+                             str_to_datetime_v2("2022-10-08 11:44:00", "%Y-%m-%d %H:%i:%s")},
+                            {{std::string("2022-10-08 11:44:23"), std::string("hour")},
+                             str_to_datetime_v2("2022-10-08 11:00:00", "%Y-%m-%d %H:%i:%s")},
+                            {{std::string("2022-10-08 11:44:23"), std::string("day")},
+                             str_to_datetime_v2("2022-10-08 00:00:00", "%Y-%m-%d %H:%i:%s")},
+                            {{std::string("2022-10-08 11:44:23"), std::string("month")},
+                             str_to_datetime_v2("2022-10-01 00:00:00", "%Y-%m-%d %H:%i:%s")},
+                            {{std::string("2022-10-08 11:44:23"), std::string("year")},
+                             str_to_datetime_v2("2022-01-01 00:00:00", "%Y-%m-%d %H:%i:%s")}};
+
+        check_function<DataTypeDateTimeV2, true>(func_name, input_types, data_set);
     }
 }
 

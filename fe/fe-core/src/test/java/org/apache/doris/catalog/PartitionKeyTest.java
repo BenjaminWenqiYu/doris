@@ -27,9 +27,9 @@ import org.junit.Test;
 
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.FileOutputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -202,9 +202,8 @@ public class PartitionKeyTest {
         FakeEnv.setMetaVersion(FeConstants.meta_version);
 
         // 1. Write objects to file
-        File file = new File("./keyRangePartition");
-        file.createNewFile();
-        DataOutputStream dos = new DataOutputStream(new FileOutputStream(file));
+        Path path = Files.createFile(Paths.get("./keyRangePartition"));
+        DataOutputStream dos = new DataOutputStream(Files.newOutputStream(path));
 
         PartitionKey keyEmpty = new PartitionKey();
         keyEmpty.write(dos);
@@ -239,18 +238,18 @@ public class PartitionKeyTest {
         dos.close();
 
         // 2. Read objects from file
-        DataInputStream dis = new DataInputStream(new FileInputStream(file));
+        DataInputStream dis = new DataInputStream(Files.newInputStream(path));
         PartitionKey rKeyEmpty = PartitionKey.read(dis);
-        Assert.assertTrue(keyEmpty.equals(rKeyEmpty));
+        Assert.assertEquals(keyEmpty, rKeyEmpty);
 
         PartitionKey rKey = new PartitionKey();
         rKey.readFields(dis);
-        Assert.assertTrue(key.equals(rKey));
-        Assert.assertTrue(key.equals(key));
-        Assert.assertFalse(key.equals(this));
+        Assert.assertEquals(key, rKey);
+        Assert.assertEquals(key, key);
+        Assert.assertNotEquals(key, this);
 
         // 3. delete files
         dis.close();
-        file.delete();
+        Files.deleteIfExists(path);
     }
 }

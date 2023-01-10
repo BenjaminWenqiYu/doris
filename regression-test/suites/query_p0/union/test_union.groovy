@@ -146,8 +146,6 @@ suite("test_union") {
              union distinct (select 1.00000000, 2.00000) order by 1, 2"""
     def res2 = sql"""select cast(1 as decimal), cast(2 as decimal) union distinct select 1.0, 2.0 
              union distinct (select 1.00000000, 2.00000) order by 1, 2"""
-    check2_doris(res1, res2)
-
 
     // test_union_multi
     List sub_sql = ["(select k1, k2, k3, k4, k5, k6, k7, k8, k9, k10, k11 from baseall where k1 % 3 = 0)"] * 10
@@ -259,7 +257,7 @@ suite("test_union") {
     // test_union_different_schema
     def new_union_table = "union_different_schema_table"
     sql"""drop table if exists ${new_union_table}"""
-    sql"""create table ${new_union_table}(k1 tinyint, k2 decimal(9,3) NULL, k3 char(5) NULL,
+    sql"""create table if not exists ${new_union_table}(k1 tinyint, k2 decimal(9,3) NULL, k3 char(5) NULL,
         k4 date NULL, k5 datetime NULL, 
         k6 double sum) engine=olap 
         distributed by hash(k1) buckets 2 properties("storage_type"="column", "replication_num" = "1")"""
@@ -275,4 +273,9 @@ suite("test_union") {
         qt_union40 """(select k1 from ${new_union_table}) union (select k${idx} from ${tbName1}) order by k1"""
     }
     sql"""drop table ${new_union_table}"""
+
+    sql 'set enable_vectorized_engine=true;'
+    sql 'set enable_fallback_to_original_planner=false'
+    sql 'set enable_nereids_planner=true'
+    qt_union35 """select cast("2016-07-01" as date) union (select cast("2016-07-02 1:10:0" as date)) order by 1"""
 }

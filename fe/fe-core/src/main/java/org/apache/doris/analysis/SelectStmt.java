@@ -20,6 +20,7 @@
 
 package org.apache.doris.analysis;
 
+import org.apache.doris.analysis.CompoundPredicate.Operator;
 import org.apache.doris.catalog.AggregateFunction;
 import org.apache.doris.catalog.Column;
 import org.apache.doris.catalog.DatabaseIf;
@@ -36,6 +37,7 @@ import org.apache.doris.common.ColumnAliasGenerator;
 import org.apache.doris.common.ErrorCode;
 import org.apache.doris.common.ErrorReport;
 import org.apache.doris.common.Pair;
+import org.apache.doris.common.Reference;
 import org.apache.doris.common.TableAliasGenerator;
 import org.apache.doris.common.TreeNode;
 import org.apache.doris.common.UserException;
@@ -193,6 +195,32 @@ public class SelectStmt extends QueryStmt {
         analyticInfo = null;
         baseTblSmap.clear();
         groupingInfo = null;
+    }
+
+    public List<Expr> getAllExprs() {
+        List<Expr> exprs = new ArrayList<Expr>();
+        if (originSelectList != null) {
+            exprs.addAll(originSelectList.getExprs());
+        }
+        if (havingClause != null) {
+            exprs.add(havingClause);
+        }
+        if (havingPred != null) {
+            exprs.add(havingPred);
+        }
+        if (havingClauseAfterAnaylzed != null) {
+            exprs.add(havingClauseAfterAnaylzed);
+        }
+        return exprs;
+    }
+
+    public boolean haveStar() {
+        for (SelectListItem item : selectList.getItems()) {
+            if (item.isStar()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     @Override
@@ -414,33 +442,57 @@ public class SelectStmt extends QueryStmt {
             registerIsNotEmptyPredicates(analyzer);
         }
         // populate selectListExprs, aliasSMap, groupingSmap and colNames
-        for (SelectListItem item : selectList.getItems()) {
-            if (item.isStar()) {
-                TableName tblName = item.getTblName();
-                if (tblName == null) {
-                    expandStar(analyzer);
-                } else {
-                    expandStar(analyzer, tblName);
-                }
+        if (selectList.isExcept()) {
+            List<SelectListItem> items = selectList.getItems();
+            TableName tblName = items.get(0).getTblName();
+            if (tblName == null) {
+                expandStar(analyzer);
             } else {
-                // Analyze the resultExpr before generating a label to ensure enforcement
-                // of expr child and depth limits (toColumn() label may call toSql()).
-                item.getExpr().analyze(analyzer);
-                if (!(item.getExpr() instanceof CaseExpr)
-                        && item.getExpr().contains(Predicates.instanceOf(Subquery.class))) {
-                    throw new AnalysisException("Subquery is not supported in the select list.");
+                expandStar(analyzer, tblName);
+            }
+
+            // get excepted cols
+            ArrayList<String> exceptCols = new ArrayList<>();
+            for (SelectListItem item : items) {
+                Expr expr = item.getExpr();
+                if (!(item.getExpr() instanceof SlotRef)) {
+                    throw new AnalysisException("`SELECT * EXCEPT` only supports column name.");
                 }
-                Expr expr = rewriteQueryExprByMvColumnExpr(item.getExpr(), analyzer);
-                resultExprs.add(expr);
-                SlotRef aliasRef = new SlotRef(null, item.toColumnLabel());
-                Expr existingAliasExpr = aliasSMap.get(aliasRef);
-                if (existingAliasExpr != null && !existingAliasExpr.equals(item.getExpr())) {
-                    // If we have already seen this alias, it refers to more than one column and
-                    // therefore is ambiguous.
-                    ambiguousAliasList.add(aliasRef);
+                exceptCols.add(expr.toColumnLabel());
+            }
+            // remove excepted columns
+            resultExprs.removeIf(expr -> exceptCols.contains(expr.toColumnLabel()));
+            colLabels.removeIf(exceptCols::contains);
+
+        } else {
+            for (SelectListItem item : selectList.getItems()) {
+                if (item.isStar()) {
+                    TableName tblName = item.getTblName();
+                    if (tblName == null) {
+                        expandStar(analyzer);
+                    } else {
+                        expandStar(analyzer, tblName);
+                    }
+                } else {
+                    // Analyze the resultExpr before generating a label to ensure enforcement
+                    // of expr child and depth limits (toColumn() label may call toSql()).
+                    item.getExpr().analyze(analyzer);
+                    if (!(item.getExpr() instanceof CaseExpr)
+                            && item.getExpr().contains(Predicates.instanceOf(Subquery.class))) {
+                        throw new AnalysisException("Subquery is not supported in the select list.");
+                    }
+                    Expr expr = rewriteQueryExprByMvColumnExpr(item.getExpr(), analyzer);
+                    resultExprs.add(expr);
+                    SlotRef aliasRef = new SlotRef(null, item.toColumnLabel());
+                    Expr existingAliasExpr = aliasSMap.get(aliasRef);
+                    if (existingAliasExpr != null && !existingAliasExpr.equals(item.getExpr())) {
+                        // If we have already seen this alias, it refers to more than one column and
+                        // therefore is ambiguous.
+                        ambiguousAliasList.add(aliasRef);
+                    }
+                    aliasSMap.put(aliasRef, item.getExpr().clone());
+                    colLabels.add(item.toColumnLabel());
                 }
-                aliasSMap.put(aliasRef, item.getExpr().clone());
-                colLabels.add(item.toColumnLabel());
             }
         }
         if (groupByClause != null && groupByClause.isGroupByExtension()) {
@@ -535,6 +587,7 @@ public class SelectStmt extends QueryStmt {
         }
         analyzeAggregation(analyzer);
         createAnalyticInfo(analyzer);
+        eliminatingSortNode();
         if (evaluateOrderBy) {
             createSortTupleInfo(analyzer);
         }
@@ -559,7 +612,7 @@ public class SelectStmt extends QueryStmt {
             }
         }
         if (hasOutFileClause()) {
-            outFileClause.analyze(analyzer, resultExprs);
+            outFileClause.analyze(analyzer, resultExprs, colLabels);
         }
     }
 
@@ -598,7 +651,7 @@ public class SelectStmt extends QueryStmt {
     @Override
     public List<TupleId> collectTupleIds() {
         List<TupleId> result = Lists.newArrayList();
-        resultExprs.stream().forEach(expr -> expr.getIds(result, null));
+        resultExprs.forEach(expr -> expr.getIds(result, null));
         result.addAll(getTableRefIds());
         if (whereClause != null) {
             whereClause.getIds(result, null);
@@ -683,6 +736,9 @@ public class SelectStmt extends QueryStmt {
         List<Expr> baseTblJoinConjuncts =
                 Expr.trySubstituteList(unassignedJoinConjuncts, baseTblSmap, analyzer, false);
         analyzer.materializeSlots(baseTblJoinConjuncts);
+        List<Expr> markConjuncts = analyzer.getMarkConjuncts();
+        markConjuncts = Expr.trySubstituteList(markConjuncts, baseTblSmap, analyzer, false);
+        analyzer.materializeSlots(markConjuncts);
 
         if (evaluateOrderBy) {
             // mark ordering exprs before marking agg/analytic exprs because they could contain
@@ -927,6 +983,13 @@ public class SelectStmt extends QueryStmt {
         }
     }
 
+    private boolean isContainInBitmap(Expr expr) {
+        List<Expr> inPredicates = Lists.newArrayList();
+        expr.collect(InPredicate.class, inPredicates);
+        return inPredicates.stream().anyMatch(e -> e.getChild(1) instanceof Subquery
+                && ((Subquery) e.getChild(1)).getStatement().getResultExprs().get(0).getType().isBitmapType());
+    }
+
     /**
      * Analyze aggregation-relevant components of the select block (Group By clause,
      * select list, Order By clause),
@@ -958,7 +1021,41 @@ public class SelectStmt extends QueryStmt {
              *                     (select min(k1) from table b where a.key=b.k2);
              * TODO: the a.key should be replaced by a.k1 instead of unknown column 'key' in 'a'
              */
-            havingClauseAfterAnaylzed = havingClause.substitute(aliasSMap, analyzer, false);
+
+            // according to mysql
+            // having clause should use column name inside group by clause, prior to alias.
+            // case1: having clause use column name table.v1, because v1 inside group by clause
+            //     select id, sum(v1) v1 from table group by id,v1 having(v1>1);
+            // case2: having clause use alias name v2, because v2 is not inside group by clause
+            //     select id, sum(v1) v1, sum(v2) v2 from table group by id,v1 having(v1>1 AND v2>1);
+            // case3: having clause use alias name v, because table do not have column name v
+            //     select id, floor(v1) v, sum(v2) v2 from table group by id,v having(v>1 AND v2>1);
+            if (groupByClause != null) {
+                ExprSubstitutionMap excludeGroupByaliasSMap = aliasSMap.clone();
+                // according to case2, maybe some having slots inside group by clause, some do not
+                List<Expr> groupBySlots = Lists.newArrayList();
+                for (Expr expr : groupByClause.getGroupingExprs()) {
+                    expr.collect(SlotRef.class, groupBySlots);
+                }
+                for (Expr expr : groupBySlots) {
+                    if (excludeGroupByaliasSMap.get(expr) == null) {
+                        continue;
+                    }
+                    try {
+                        // try to use column name firstly
+                        expr.clone().analyze(analyzer);
+                        // analyze success means column name exist, do not use alias name
+                        excludeGroupByaliasSMap.removeByLhsExpr(expr);
+                    } catch (AnalysisException ex) {
+                        // according to case3, column name do not exist, keep alias name inside alias map
+                    }
+                }
+                havingClauseAfterAnaylzed = havingClause.substitute(excludeGroupByaliasSMap, analyzer, false);
+            } else {
+                // according to mysql
+                // if there is no group by clause, the having clause should use alias
+                havingClauseAfterAnaylzed = havingClause.substitute(aliasSMap, analyzer, false);
+            }
             havingClauseAfterAnaylzed = rewriteQueryExprByMvColumnExpr(havingClauseAfterAnaylzed, analyzer);
             havingClauseAfterAnaylzed.checkReturnsBool("HAVING clause", true);
             if (groupingInfo != null) {
@@ -970,6 +1067,10 @@ public class SelectStmt extends QueryStmt {
                 throw new AnalysisException(
                         "HAVING clause must not contain analytic expressions: "
                                 + analyticExpr.toSql());
+            }
+            if (isContainInBitmap(havingClauseAfterAnaylzed)) {
+                throw new AnalysisException(
+                        "HAVING clause dose not support in bitmap syntax: " + havingClauseAfterAnaylzed.toSql());
             }
         }
 
@@ -1052,6 +1153,9 @@ public class SelectStmt extends QueryStmt {
         countAllMap = ExprSubstitutionMap.compose(multiCountOrSumDistinctMap, countAllMap, analyzer);
         List<Expr> substitutedAggs =
                 Expr.substituteList(aggExprs, countAllMap, analyzer, false);
+        // the resultExprs must substitute in the same way as aggExprs
+        // then resultExprs can be substitute correctly using combinedSmap
+        resultExprs = Expr.substituteList(resultExprs, countAllMap, analyzer, false);
         aggExprs.clear();
         TreeNode.collect(substitutedAggs, Expr.isAggregatePredicate(), aggExprs);
 
@@ -1063,10 +1167,19 @@ public class SelectStmt extends QueryStmt {
                 groupingInfo.buildRepeat(groupingExprs, groupByClause.getGroupingSetList());
             }
 
-            substituteOrdinalsAliases(groupingExprs, "GROUP BY", analyzer);
+            substituteOrdinalsAliases(groupingExprs, "GROUP BY", analyzer, false);
 
-            if (!groupByClause.isGroupByExtension()) {
+            if (!groupByClause.isGroupByExtension() && !groupingExprs.isEmpty()) {
+                ArrayList<Expr> tempExprs = new ArrayList<>(groupingExprs);
                 groupingExprs.removeIf(Expr::isConstant);
+                if (groupingExprs.isEmpty() && aggExprs.isEmpty()) {
+                    // should keep at least one expr to make the result correct
+                    groupingExprs.add(tempExprs.get(0));
+                }
+            }
+
+            for (int i = 0; i < groupingExprs.size(); i++) {
+                groupingExprs.set(i, rewriteQueryExprByMvColumnExpr(groupingExprs.get(i), analyzer));
             }
 
             if (groupingInfo != null) {
@@ -1078,6 +1191,11 @@ public class SelectStmt extends QueryStmt {
             createAggInfo(groupingExprs, aggExprs, analyzer);
         } else {
             createAggInfo(new ArrayList<>(), aggExprs, analyzer);
+        }
+        // we remove all constant in group by expressions, when all exprs are constant
+        // and no aggregate expr in select list, we do not generate aggInfo at all.
+        if (aggInfo == null) {
+            return;
         }
 
         // combine avg smap with the one that produces the final agg output
@@ -1277,6 +1395,9 @@ public class SelectStmt extends QueryStmt {
             ArrayList<FunctionCallExpr> aggExprs,
             Analyzer analyzer)
             throws AnalysisException {
+        for (int i = 0; i < aggExprs.size(); i++) {
+            aggExprs.set(i, (FunctionCallExpr) rewriteQueryExprByMvColumnExpr(aggExprs.get(i), analyzer));
+        }
         if (selectList.isDistinct()) {
             // Create aggInfo for SELECT DISTINCT ... stmt:
             // - all select list items turn into grouping exprs
@@ -1285,6 +1406,9 @@ public class SelectStmt extends QueryStmt {
             Preconditions.checkState(aggExprs.isEmpty());
             aggInfo = AggregateInfo.create(Expr.cloneList(resultExprs), null, null, analyzer);
         } else {
+            if (CollectionUtils.isEmpty(groupingExprs) && CollectionUtils.isEmpty(aggExprs)) {
+                return;
+            }
             aggInfo = AggregateInfo.create(groupingExprs, aggExprs, null, analyzer);
         }
     }
@@ -1381,12 +1505,44 @@ public class SelectStmt extends QueryStmt {
             }
             List<Expr> oriGroupingExprs = groupByClause.getOriGroupingExprs();
             if (oriGroupingExprs != null) {
+                // we must make sure the expr is analyzed before rewrite
+                try {
+                    for (Expr expr : oriGroupingExprs) {
+                        if (!(expr instanceof SlotRef)) {
+                            // if group expr is not a slotRef, it should be analyzed in the same way as result expr
+                            // otherwise, the group expr is either a simple column or an alias, no need to analyze
+                            expr.analyze(analyzer);
+                        }
+                    }
+                } catch (AnalysisException ex) {
+                    //ignore any exception
+                }
                 rewriter.rewriteList(oriGroupingExprs, analyzer);
+                // after rewrite, need reset the analyze status for later re-analyze
+                for (Expr expr : oriGroupingExprs) {
+                    if (!(expr instanceof SlotRef)) {
+                        expr.reset();
+                    }
+                }
             }
         }
         if (orderByElements != null) {
             for (OrderByElement orderByElem : orderByElements) {
+                // we must make sure the expr is analyzed before rewrite
+                try {
+                    if (!(orderByElem.getExpr() instanceof SlotRef)) {
+                        // if sort expr is not a slotRef, it should be analyzed in the same way as result expr
+                        // otherwise, the sort expr is either a simple column or an alias, no need to analyze
+                        orderByElem.getExpr().analyze(analyzer);
+                    }
+                } catch (AnalysisException ex) {
+                    //ignore any exception
+                }
                 orderByElem.setExpr(rewriter.rewrite(orderByElem.getExpr(), analyzer));
+                // after rewrite, need reset the analyze status for later re-analyze
+                if (!(orderByElem.getExpr() instanceof SlotRef)) {
+                    orderByElem.getExpr().reset();
+                }
             }
         }
     }
@@ -1662,6 +1818,79 @@ public class SelectStmt extends QueryStmt {
         return expr;
     }
 
+    public void eliminatingSortNode() {
+        // initial sql: select * from t1 where k1 = 1 order by k1
+        // optimized sql: select * from t1 where k1 = 1
+        if (ConnectContext.get() == null || !ConnectContext.get().getSessionVariable().enableEliminateSortNode) {
+            return;
+        }
+        if (!evaluateOrderBy() || getSortInfo() == null || getWhereClause() == null) {
+            return;
+        }
+        List<SlotRef> sortSlots = new ArrayList<>();
+        // get source slot ref from order by clause
+        for (Expr expr : getSortInfo().getOrderingExprs()) {
+            SlotRef source = expr.getSrcSlotRef();
+            if (source == null) {
+                return;
+            }
+            sortSlots.add(source);
+        }
+        if (sortSlots.isEmpty()) {
+            return;
+        }
+        if (checkSortNodeEliminable(getWhereClause(), sortSlots) && sortSlots.isEmpty()) {
+            evaluateOrderBy = false;
+        }
+    }
+
+    private boolean checkSortNodeEliminable(Expr expr, List<SlotRef> sortSlotRefs) {
+        // 1. Check that the CompoundPredicates in the whereClause are all AndCompound
+        if (expr instanceof CompoundPredicate) {
+            if (((CompoundPredicate) expr).getOp() != Operator.AND) {
+                // fail to eliminate
+                return false;
+            }
+        }
+        // 2. Check that all sort slots have:
+        // 2.1 at least one BinaryPredicate expression equal to a constant
+        // 2.2 OR at least one InPredicate expression containing only one constant
+        // in the whereClause
+        if (expr instanceof BinaryPredicate) {
+            Reference<SlotRef> slotRefRef = new Reference<>();
+            BinaryPredicate binaryPredicate = (BinaryPredicate) expr;
+            if (binaryPredicate.isSingleColumnPredicate(slotRefRef, null)) {
+                if (binaryPredicate.getOp() != BinaryPredicate.Operator.EQ) {
+                    // it's ok, try to check next expr
+                    return true;
+                }
+                // remove it
+                sortSlotRefs.remove(slotRefRef.getRef());
+            }
+        } else if (expr instanceof InPredicate) {
+            if (((InPredicate) expr).isNotIn()) {
+                return true;
+            }
+            // there can only be two child nodes, one is a slotref and the other is a constant
+            if (expr.getChildren().size() != 2) {
+                // it's ok, try to check next expr
+                return true;
+            }
+            if (!expr.getChild(1).isConstant()) {
+                // it's ok, try to check next expr
+                return true;
+            }
+            // remove it
+            sortSlotRefs.remove(expr.getChild(0).unwrapSlotRef());
+        }
+        for (Expr child : expr.getChildren()) {
+            if (!checkSortNodeEliminable(child, sortSlotRefs)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     @Override
     public String toSql() {
         if (sqlString != null) {
@@ -1678,18 +1907,26 @@ public class SelectStmt extends QueryStmt {
         if (selectList.isDistinct()) {
             strBuilder.append("DISTINCT ");
         }
-        for (int i = 0; i < resultExprs.size(); ++i) {
-            // strBuilder.append(selectList.getItems().get(i).toSql());
-            // strBuilder.append((i + 1 != selectList.getItems().size()) ? ", " : "");
-            if (i != 0) {
-                strBuilder.append(", ");
+        ConnectContext ctx = ConnectContext.get();
+        if (ctx == null || ctx.getSessionVariable().internalSession || toSQLWithSelectList) {
+            for (int i = 0; i < selectList.getItems().size(); i++) {
+                strBuilder.append(selectList.getItems().get(i).toSql());
+                strBuilder.append((i + 1 != selectList.getItems().size()) ? ", " : "");
             }
-            if (needToSql) {
-                strBuilder.append(originalExpr.get(i).toSql());
-            } else {
-                strBuilder.append(resultExprs.get(i).toSql());
+        } else {
+            for (int i = 0; i < resultExprs.size(); ++i) {
+                // strBuilder.append(selectList.getItems().get(i).toSql());
+                // strBuilder.append((i + 1 != selectList.getItems().size()) ? ", " : "");
+                if (i != 0) {
+                    strBuilder.append(", ");
+                }
+                if (needToSql) {
+                    strBuilder.append(originalExpr.get(i).toSql());
+                } else {
+                    strBuilder.append(resultExprs.get(i).toSql());
+                }
+                strBuilder.append(" AS ").append(SqlUtils.getIdentSql(colLabels.get(i)));
             }
-            strBuilder.append(" AS ").append(SqlUtils.getIdentSql(colLabels.get(i)));
         }
 
         // From clause
@@ -1888,7 +2125,7 @@ public class SelectStmt extends QueryStmt {
         }
         // substitute group by
         if (groupByClause != null) {
-            substituteOrdinalsAliases(groupByClause.getGroupingExprs(), "GROUP BY", analyzer);
+            substituteOrdinalsAliases(groupByClause.getGroupingExprs(), "GROUP BY", analyzer, false);
         }
         // substitute having
         if (havingClause != null) {

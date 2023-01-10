@@ -21,7 +21,6 @@
 
 #include "runtime/descriptors.h"
 #include "runtime/row_batch.h"
-#include "runtime/sorter.h"
 #include "util/debug_util.h"
 #include "util/defer_op.h"
 #include "util/runtime_profile.h"
@@ -50,7 +49,9 @@ Status VSortedRunMerger::prepare(const vector<BlockSupplier>& input_runs, bool p
     }
 
     for (auto& _cursor : _cursors) {
-        if (!_cursor._is_eof) _priority_queue.push(SortCursor(&_cursor));
+        if (!_cursor._is_eof) {
+            _priority_queue.push(MergeSortCursor(&_cursor));
+        }
     }
 
     for (const auto& cursor : _cursors) {
@@ -142,7 +143,7 @@ Status VSortedRunMerger::get_next(Block* output_block, bool* eos) {
     return Status::OK();
 }
 
-void VSortedRunMerger::next_heap(SortCursor& current) {
+void VSortedRunMerger::next_heap(MergeSortCursor& current) {
     if (!current->isLast()) {
         current->next();
         _priority_queue.push(current);
@@ -151,7 +152,7 @@ void VSortedRunMerger::next_heap(SortCursor& current) {
     }
 }
 
-inline bool VSortedRunMerger::has_next_block(doris::vectorized::SortCursor& current) {
+inline bool VSortedRunMerger::has_next_block(doris::vectorized::MergeSortCursor& current) {
     ScopedTimer<MonotonicStopWatch> timer(_get_next_block_timer);
     return current->has_next_block();
 }

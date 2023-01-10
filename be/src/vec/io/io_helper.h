@@ -39,6 +39,7 @@ namespace doris::vectorized {
 // Define in the namespace and avoid defining global macros,
 // because it maybe conflict with other libs
 static constexpr size_t DEFAULT_MAX_STRING_SIZE = 1073741824; // 1GB
+static constexpr size_t DEFAULT_MAX_JSON_SIZE = 1073741824;   // 1GB
 static constexpr auto WRITE_HELPERS_MAX_INT_WIDTH = 40U;
 
 template <typename T>
@@ -70,14 +71,18 @@ template <typename T>
 void write_text(Decimal<T> value, UInt32 scale, std::ostream& ostr) {
     if (value < Decimal<T>(0)) {
         value *= Decimal<T>(-1);
-        ostr << '-';
+        if (value > Decimal<T>(0)) {
+            ostr << '-';
+        }
     }
 
-    T whole_part = value;
+    using Type = std::conditional_t<std::is_same_v<T, Int128I>, int128_t, T>;
+    Type whole_part = value;
+
     if (scale) {
-        whole_part = value / decimal_scale_multiplier<T>(scale);
+        whole_part = value / decimal_scale_multiplier<Type>(scale);
     }
-    if constexpr (std::is_same<T, __int128_t>::value) {
+    if constexpr (std::is_same_v<T, __int128_t> || std::is_same_v<T, Int128I>) {
         ostr << int128_to_string(whole_part);
     } else {
         ostr << whole_part;
@@ -85,8 +90,18 @@ void write_text(Decimal<T> value, UInt32 scale, std::ostream& ostr) {
     if (scale) {
         ostr << '.';
         String str_fractional(scale, '0');
-        for (Int32 pos = scale - 1; pos >= 0; --pos, value /= Decimal<T>(10))
-            str_fractional[pos] += value % Decimal<T>(10);
+        Int32 pos = scale - 1;
+        if (value < Decimal<T>(0) && pos >= 0) {
+            // Reach here iff this value is a min value of a signed numeric type. It means min<int>()
+            // which is -2147483648 multiply -1 is still -2147483648.
+            str_fractional[pos] += (value / 10 * 10) - value;
+            pos--;
+            value /= 10;
+            value *= Decimal<T>(-1);
+        }
+        for (; pos >= 0; --pos, value /= 10) {
+            str_fractional[pos] += value % 10;
+        }
         ostr.write(str_fractional.data(), scale);
     }
 }
@@ -120,6 +135,10 @@ inline void write_string_binary(const StringRef& s, BufferWritable& buf) {
 
 inline void write_string_binary(const char* s, BufferWritable& buf) {
     write_string_binary(StringRef {s}, buf);
+}
+
+inline void write_json_binary(JsonbField s, BufferWritable& buf) {
+    write_string_binary(StringRef {s.get_value(), s.get_size()}, buf);
 }
 
 template <typename Type>
@@ -161,7 +180,7 @@ inline void read_float_binary(Type& x, BufferReadable& buf) {
 
 inline void read_string_binary(std::string& s, BufferReadable& buf,
                                size_t MAX_STRING_SIZE = DEFAULT_MAX_STRING_SIZE) {
-    size_t size = 0;
+    UInt64 size = 0;
     read_var_uint(size, buf);
 
     if (size > MAX_STRING_SIZE) {
@@ -174,7 +193,7 @@ inline void read_string_binary(std::string& s, BufferReadable& buf,
 
 inline void read_string_binary(StringRef& s, BufferReadable& buf,
                                size_t MAX_STRING_SIZE = DEFAULT_MAX_STRING_SIZE) {
-    size_t size = 0;
+    UInt64 size = 0;
     read_var_uint(size, buf);
 
     if (size > MAX_STRING_SIZE) {
@@ -185,7 +204,7 @@ inline void read_string_binary(StringRef& s, BufferReadable& buf,
 }
 
 inline StringRef read_string_binary_into(Arena& arena, BufferReadable& buf) {
-    size_t size = 0;
+    UInt64 size = 0;
     read_var_uint(size, buf);
 
     char* data = arena.alloc(size);
@@ -194,10 +213,16 @@ inline StringRef read_string_binary_into(Arena& arena, BufferReadable& buf) {
     return StringRef(data, size);
 }
 
+inline void read_json_binary(JsonbField val, BufferReadable& buf,
+                             size_t MAX_JSON_SIZE = DEFAULT_MAX_JSON_SIZE) {
+    StringRef jrf = StringRef {val.get_value(), val.get_size()};
+    read_string_binary(jrf, buf);
+}
+
 template <typename Type>
 void read_vector_binary(std::vector<Type>& v, BufferReadable& buf,
                         size_t MAX_VECTOR_SIZE = DEFAULT_MAX_STRING_SIZE) {
-    size_t size = 0;
+    UInt64 size = 0;
     read_var_uint(size, buf);
 
     if (size > MAX_VECTOR_SIZE) {
@@ -307,7 +332,7 @@ bool read_datetime_v2_text_impl(T& x, ReadBuffer& buf, UInt32 scale = -1) {
 template <typename T>
 bool read_decimal_text_impl(T& x, ReadBuffer& buf, UInt32 precision, UInt32 scale) {
     static_assert(IsDecimalNumber<T>);
-    if (config::enable_decimalv3) {
+    if constexpr (!std::is_same_v<Decimal128, T>) {
         StringParser::ParseResult result = StringParser::PARSE_SUCCESS;
 
         x.value = StringParser::string_to_decimal<typename T::NativeType>(
@@ -315,15 +340,16 @@ bool read_decimal_text_impl(T& x, ReadBuffer& buf, UInt32 precision, UInt32 scal
         // only to match the is_all_read() check to prevent return null
         buf.position() = buf.end();
         return result != StringParser::PARSE_FAILURE;
+    } else {
+        auto dv = binary_cast<Int128, DecimalV2Value>(x.value);
+        auto ans = dv.parse_from_str((const char*)buf.position(), buf.count()) == 0;
+
+        // only to match the is_all_read() check to prevent return null
+        buf.position() = buf.end();
+
+        x.value = dv.value();
+        return ans;
     }
-    auto dv = binary_cast<Int128, DecimalV2Value>(x.value);
-    auto ans = dv.parse_from_str((const char*)buf.position(), buf.count()) == 0;
-
-    // only to match the is_all_read() check to prevent return null
-    buf.position() = buf.end();
-
-    x.value = dv.value();
-    return ans;
 }
 
 template <typename T>
@@ -346,6 +372,24 @@ bool try_read_bool_text(T& x, ReadBuffer& buf) {
 template <typename T>
 bool try_read_int_text(T& x, ReadBuffer& buf) {
     return read_int_text_impl<T>(x, buf);
+}
+
+template <typename T>
+static inline const char* try_read_first_int_text(T& x, const char* pos, const char* end) {
+    const int len = end - pos;
+    int i = 0;
+    while (i < len) {
+        if (pos[i] >= '0' && pos[i] <= '9') {
+            i++;
+        } else {
+            break;
+        }
+    }
+    const char* int_end = pos + i;
+    ReadBuffer in((char*)pos, int_end - pos);
+    const size_t count = in.count();
+    try_read_int_text(x, in);
+    return pos + count;
 }
 
 template <typename T>

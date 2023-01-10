@@ -21,15 +21,18 @@
 package org.apache.doris.planner;
 
 import org.apache.doris.analysis.Analyzer;
+import org.apache.doris.analysis.BitmapFilterPredicate;
 import org.apache.doris.analysis.CompoundPredicate;
 import org.apache.doris.analysis.Expr;
 import org.apache.doris.analysis.ExprId;
 import org.apache.doris.analysis.ExprSubstitutionMap;
 import org.apache.doris.analysis.FunctionName;
 import org.apache.doris.analysis.SlotId;
+import org.apache.doris.analysis.SlotRef;
 import org.apache.doris.analysis.TupleDescriptor;
 import org.apache.doris.analysis.TupleId;
 import org.apache.doris.catalog.Function;
+import org.apache.doris.catalog.OlapTable;
 import org.apache.doris.catalog.Type;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.NotImplementedException;
@@ -79,6 +82,7 @@ public abstract class PlanNode extends TreeNode<PlanNode> implements PlanStats {
     protected PlanNodeId id;  // unique w/in plan tree; assigned by planner
     protected PlanFragmentId fragmentId;  // assigned by planner after fragmentation step
     protected long limit; // max. # of rows to be returned; 0: no limit
+    protected long offset;
 
     // ids materialized by the tree rooted at this node
     protected ArrayList<TupleId> tupleIds;
@@ -148,6 +152,7 @@ public abstract class PlanNode extends TreeNode<PlanNode> implements PlanStats {
             StatisticalType statisticalType) {
         this.id = id;
         this.limit = -1;
+        this.offset = 0;
         // make a copy, just to be on the safe side
         this.tupleIds = Lists.newArrayList(tupleIds);
         this.tblRefIds = Lists.newArrayList(tupleIds);
@@ -174,6 +179,7 @@ public abstract class PlanNode extends TreeNode<PlanNode> implements PlanStats {
     protected PlanNode(PlanNodeId id, PlanNode node, String planNodeName, StatisticalType statisticalType) {
         this.id = id;
         this.limit = node.limit;
+        this.offset = node.offset;
         this.tupleIds = Lists.newArrayList(node.tupleIds);
         this.tblRefIds = Lists.newArrayList(node.tblRefIds);
         this.nullableTupleIds = Sets.newHashSet(node.nullableTupleIds);
@@ -235,6 +241,10 @@ public abstract class PlanNode extends TreeNode<PlanNode> implements PlanStats {
         return fragment.getFragmentId();
     }
 
+    public int getFragmentSeqenceNum() {
+        return fragment.getFragmentSequenceNum();
+    }
+
     public void setFragmentId(PlanFragmentId id) {
         fragmentId = id;
     }
@@ -251,6 +261,10 @@ public abstract class PlanNode extends TreeNode<PlanNode> implements PlanStats {
         return limit;
     }
 
+    public long getOffset() {
+        return offset;
+    }
+
     /**
      * Set the limit to the given limit only if the limit hasn't been set, or the new limit
      * is lower.
@@ -263,8 +277,29 @@ public abstract class PlanNode extends TreeNode<PlanNode> implements PlanStats {
         }
     }
 
+    public void setLimitAndOffset(long limit, long offset) {
+        if (this.limit == -1) {
+            this.limit = limit;
+        } else if (limit != -1) {
+            this.limit = Math.min(this.limit - offset, limit);
+        }
+        this.offset += offset;
+    }
+
+    public void setOffset(long offset) {
+        this.offset = offset;
+    }
+
     public boolean hasLimit() {
         return limit > -1;
+    }
+
+    public boolean hasOffset() {
+        return offset != 0;
+    }
+
+    public void setCardinality(long cardinality) {
+        this.cardinality = cardinality;
     }
 
     public long getCardinality() {
@@ -346,7 +381,7 @@ public abstract class PlanNode extends TreeNode<PlanNode> implements PlanStats {
         return statsDeriveResultList;
     }
 
-    void initCompoundPredicate(Expr expr) {
+    protected void initCompoundPredicate(Expr expr) {
         if (expr instanceof CompoundPredicate) {
             CompoundPredicate compoundPredicate = (CompoundPredicate) expr;
             compoundPredicate.setType(Type.BOOLEAN);
@@ -364,7 +399,7 @@ public abstract class PlanNode extends TreeNode<PlanNode> implements PlanStats {
         }
     }
 
-    Expr convertConjunctsToAndCompoundPredicate(List<Expr> conjuncts) {
+    protected Expr convertConjunctsToAndCompoundPredicate(List<Expr> conjuncts) {
         List<Expr> targetConjuncts = Lists.newArrayList(conjuncts);
         while (targetConjuncts.size() > 1) {
             List<Expr> newTargetConjuncts = Lists.newArrayList();
@@ -872,7 +907,7 @@ public abstract class PlanNode extends TreeNode<PlanNode> implements PlanStats {
     private void applySelectivity() {
         double selectivity = computeSelectivity();
         Preconditions.checkState(cardinality >= 0);
-        long preConjunctCardinality = cardinality;
+        double preConjunctCardinality = cardinality;
         cardinality = Math.round(cardinality * selectivity);
         // don't round cardinality down to zero for safety.
         if (cardinality == 0 && preConjunctCardinality > 0) {
@@ -883,23 +918,53 @@ public abstract class PlanNode extends TreeNode<PlanNode> implements PlanStats {
     public String getPlanTreeExplainStr() {
         StringBuilder sb = new StringBuilder();
         sb.append("[").append(getId().asInt()).append(": ").append(getPlanNodeName()).append("]");
-        sb.append("\n[Fragment: ").append(getFragmentId().asInt()).append("]");
+        sb.append("\n[Fragment: ").append(getFragmentSeqenceNum()).append("]");
         sb.append("\n").append(getNodeExplainString("", TExplainLevel.BRIEF));
         return sb.toString();
     }
 
-    public ScanNode getScanNodeInOneFragmentByTupleId(TupleId tupleId) {
+    public ScanNode getScanNodeInOneFragmentBySlotRef(SlotRef slotRef) {
+        TupleId tupleId = slotRef.getDesc().getParent().getId();
         if (this instanceof ScanNode && tupleIds.contains(tupleId)) {
             return (ScanNode) this;
+        } else if (this instanceof HashJoinNode) {
+            HashJoinNode hashJoinNode = (HashJoinNode) this;
+            SlotRef inputSlotRef = hashJoinNode.getMappedInputSlotRef(slotRef);
+            if (inputSlotRef != null) {
+                for (PlanNode planNode : children) {
+                    ScanNode scanNode = planNode.getScanNodeInOneFragmentBySlotRef(inputSlotRef);
+                    if (scanNode != null) {
+                        return scanNode;
+                    }
+                }
+            } else {
+                return null;
+            }
         } else if (!(this instanceof ExchangeNode)) {
             for (PlanNode planNode : children) {
-                ScanNode scanNode = planNode.getScanNodeInOneFragmentByTupleId(tupleId);
+                ScanNode scanNode = planNode.getScanNodeInOneFragmentBySlotRef(slotRef);
                 if (scanNode != null) {
                     return scanNode;
                 }
             }
         }
         return null;
+    }
+
+    public SlotRef findSrcSlotRef(SlotRef slotRef) {
+        if (slotRef.getTable() instanceof OlapTable) {
+            return slotRef;
+        }
+        if (this instanceof HashJoinNode) {
+            HashJoinNode hashJoinNode = (HashJoinNode) this;
+            SlotRef inputSlotRef = hashJoinNode.getMappedInputSlotRef(slotRef);
+            if (inputSlotRef != null) {
+                return hashJoinNode.getChild(0).findSrcSlotRef(inputSlotRef);
+            } else {
+                return slotRef;
+            }
+        }
+        return slotRef;
     }
 
     protected void addRuntimeFilter(RuntimeFilter filter) {
@@ -914,7 +979,7 @@ public abstract class PlanNode extends TreeNode<PlanNode> implements PlanStats {
         runtimeFilters.clear();
     }
 
-    protected String getRuntimeFilterExplainString(boolean isBuildNode) {
+    protected String getRuntimeFilterExplainString(boolean isBuildNode, boolean isBrief) {
         if (runtimeFilters.isEmpty()) {
             return "";
         }
@@ -922,24 +987,36 @@ public abstract class PlanNode extends TreeNode<PlanNode> implements PlanStats {
         for (RuntimeFilter filter : runtimeFilters) {
             StringBuilder filterStr = new StringBuilder();
             filterStr.append(filter.getFilterId());
-            filterStr.append("[");
-            filterStr.append(filter.getType().toString().toLowerCase());
-            filterStr.append("]");
-            if (isBuildNode) {
-                filterStr.append(" <- ");
-                filterStr.append(filter.getSrcExpr().toSql());
-            } else {
-                filterStr.append(" -> ");
-                filterStr.append(filter.getTargetExpr(getId()).toSql());
+            if (!isBrief) {
+                filterStr.append("[");
+                filterStr.append(filter.getType().toString().toLowerCase());
+                filterStr.append("]");
+                if (isBuildNode) {
+                    filterStr.append(" <- ");
+                    filterStr.append(filter.getSrcExpr().toSql());
+                } else {
+                    filterStr.append(" -> ");
+                    filterStr.append(filter.getTargetExpr(getId()).toSql());
+                }
             }
             filtersStr.add(filterStr.toString());
         }
         return Joiner.on(", ").join(filtersStr) + "\n";
     }
 
-    public void convertToVectoriezd() {
-        if (!conjuncts.isEmpty()) {
-            vconjunct = convertConjunctsToAndCompoundPredicate(conjuncts);
+    protected String getRuntimeFilterExplainString(boolean isBuildNode) {
+        return getRuntimeFilterExplainString(isBuildNode, false);
+    }
+
+    public void convertToVectorized() {
+        List<Expr> conjunctsExcludeBitmapFilter = Lists.newArrayList();
+        for (Expr expr : conjuncts) {
+            if (!(expr instanceof BitmapFilterPredicate)) {
+                conjunctsExcludeBitmapFilter.add(expr);
+            }
+        }
+        if (!conjunctsExcludeBitmapFilter.isEmpty()) {
+            vconjunct = convertConjunctsToAndCompoundPredicate(conjunctsExcludeBitmapFilter);
             initCompoundPredicate(vconjunct);
         }
 
@@ -949,7 +1026,7 @@ public abstract class PlanNode extends TreeNode<PlanNode> implements PlanStats {
         }
 
         for (PlanNode child : children) {
-            child.convertToVectoriezd();
+            child.convertToVectorized();
         }
     }
 

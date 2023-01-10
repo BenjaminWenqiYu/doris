@@ -86,7 +86,7 @@ void test_nullable_data(uint8_t* src_data, uint8_t* src_is_null, int num_rows,
     {
         io::FileWriterPtr file_writer;
         Status st = fs->create_file(fname, &file_writer);
-        EXPECT_TRUE(st.ok()) << st.get_error_msg();
+        EXPECT_TRUE(st.ok()) << st;
 
         ColumnWriterOptions writer_opts;
         writer_opts.meta = &meta;
@@ -129,7 +129,7 @@ void test_nullable_data(uint8_t* src_data, uint8_t* src_is_null, int num_rows,
     }
     auto type_info = get_scalar_type_info(type);
     io::FileReaderSPtr file_reader;
-    ASSERT_EQ(fs->open_file(fname, &file_reader), Status::OK());
+    ASSERT_EQ(fs->open_file(fname, &file_reader, nullptr), Status::OK());
     // read and check
     {
         // sequence read
@@ -259,7 +259,7 @@ void test_array_nullable_data(CollectionValue* src_data, uint8_t* src_is_null, i
     {
         io::FileWriterPtr file_writer;
         Status st = fs->create_file(fname, &file_writer);
-        EXPECT_TRUE(st.ok()) << st.get_error_msg();
+        EXPECT_TRUE(st.ok()) << st;
 
         ColumnWriterOptions writer_opts;
         writer_opts.meta = &meta;
@@ -305,7 +305,7 @@ void test_array_nullable_data(CollectionValue* src_data, uint8_t* src_is_null, i
     }
     auto type_info = get_type_info(&meta);
     io::FileReaderSPtr file_reader;
-    ASSERT_EQ(fs->open_file(fname, &file_reader), Status::OK());
+    ASSERT_EQ(fs->open_file(fname, &file_reader, nullptr), Status::OK());
     // read and check
     {
         ColumnReaderOptions reader_opts;
@@ -468,7 +468,6 @@ void test_read_default_value(string value, void* result) {
             cvb->resize(1024);
             ColumnBlock col(cvb.get(), &pool);
 
-            int idx = 0;
             size_t rows_read = 1024;
             ColumnBlockView dst(&col);
             bool has_null;
@@ -487,7 +486,6 @@ void test_read_default_value(string value, void* result) {
                     ;
                     EXPECT_EQ(*(Type*)result, *(reinterpret_cast<const Type*>(col.cell_ptr(j))));
                 }
-                idx++;
             }
         }
 
@@ -502,7 +500,6 @@ void test_read_default_value(string value, void* result) {
                 st = iter.seek_to_ordinal(rowid);
                 EXPECT_TRUE(st.ok());
 
-                int idx = rowid;
                 size_t rows_read = 1024;
                 ColumnBlockView dst(&col);
                 bool has_null;
@@ -521,7 +518,6 @@ void test_read_default_value(string value, void* result) {
                         EXPECT_EQ(*(Type*)result,
                                   *(reinterpret_cast<const Type*>(col.cell_ptr(j))));
                     }
-                    idx++;
                 }
             }
         }

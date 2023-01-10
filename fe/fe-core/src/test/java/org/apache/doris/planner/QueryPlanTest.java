@@ -684,7 +684,7 @@ public class QueryPlanTest extends TestWithFeService {
         String castSql = "select * from test.baseall where k11 < cast('2020-03-26' as date)";
         SelectStmt selectStmt = (SelectStmt) parseAndAnalyzeStmt(castSql);
         Expr rightExpr = selectStmt.getWhereClause().getChildren().get(1);
-        Assert.assertTrue(rightExpr.getType().equals(ScalarType.getDefaultDateType(Type.DATETIME)));
+        Assert.assertEquals(rightExpr.getType(), ScalarType.getDefaultDateType(Type.DATETIME));
 
         String castSql2 = "select str_to_date('11/09/2011', '%m/%d/%Y');";
         String explainString = getSQLPlanOrErrorMsg("explain " + castSql2);
@@ -1024,7 +1024,7 @@ public class QueryPlanTest extends TestWithFeService {
                 + "    SELECT MAX(k9)\n" + "    FROM test.pushdown_test);";
         String explainString = getSQLPlanOrErrorMsg("explain " + sql);
         Assert.assertTrue(explainString.contains("PLAN FRAGMENT"));
-        Assert.assertTrue(explainString.contains("CROSS JOIN"));
+        Assert.assertTrue(explainString.contains("NESTED LOOP JOIN"));
         Assert.assertTrue(!explainString.contains("PREDICATES"));
     }
 
@@ -1189,6 +1189,12 @@ public class QueryPlanTest extends TestWithFeService {
         Assert.assertTrue(explainString.contains("BUCKET_SHFFULE_HASH_PARTITIONED: `t1`.`k1`, `t1`.`k1`"));
         Assert.assertTrue(!explainString.contains("BUCKET_SHFFULE_HASH_PARTITIONED: `t4`.`k1`, `t4`.`k1`"));
 
+        // here only a bucket shuffle + broadcast jost join
+        queryStr = "explain SELECT * FROM test.bucket_shuffle1 T LEFT JOIN test.bucket_shuffle1 T1 ON T1.k2 = T.k1 and T.k2 = T1.k3 LEFT JOIN"
+                + " test.bucket_shuffle2 T2 ON T2.k2 = T1.k1 and T2.k1 = T1.k2;";
+        explainString = getSQLPlanOrErrorMsg(queryStr);
+        Assert.assertTrue(explainString.contains("BUCKET_SHFFULE"));
+        Assert.assertTrue(explainString.contains("BROADCAST"));
         // disable bucket shuffle join again
         Deencapsulation.setField(connectContext.getSessionVariable(), "enableBucketShuffleJoin", false);
     }
@@ -1306,7 +1312,7 @@ public class QueryPlanTest extends TestWithFeService {
         // this table is Oracle ODBC table, so abs(k1) should not be pushed down
         queryStr = "explain select * from odbc_oracle where k1 > 10 and abs(k1) > 10";
         explainString = getSQLPlanOrErrorMsg(queryStr);
-        Assert.assertTrue(explainString.contains("k1 > 10"));
+        Assert.assertTrue(explainString.contains("\"K1\" > 10"));
         Assert.assertTrue(!explainString.contains("abs(k1) > 10"));
     }
 
@@ -1346,7 +1352,7 @@ public class QueryPlanTest extends TestWithFeService {
         String explainString = getSQLPlanOrErrorMsg(queryStr);
         Assert.assertTrue(explainString.contains("TABLENAME IN DORIS: odbc_oracle"));
         Assert.assertTrue(explainString.contains("TABLE TYPE: ORACLE"));
-        Assert.assertTrue(explainString.contains("TABLENAME OF EXTERNAL TABLE: tbl1"));
+        Assert.assertTrue(explainString.contains("TABLENAME OF EXTERNAL TABLE: \"TBL1\""));
 
         // enable transaction of ODBC Sink
         Deencapsulation.setField(connectContext.getSessionVariable(), "enableOdbcTransaction", true);
@@ -1645,15 +1651,15 @@ public class QueryPlanTest extends TestWithFeService {
 
         sql = "SELECT a.k1, b.k2 FROM (SELECT k1 from baseall) a LEFT OUTER JOIN (select k1, 999 as k2 from baseall) b ON (a.k1=b.k1)";
         explainString = getSQLPlanOrErrorMsg("EXPLAIN " + sql);
-        Assert.assertTrue(explainString.contains("<slot 5>\n" + "    999"));
+        Assert.assertTrue(explainString.contains("<slot 5>\n" + "    <slot 7>"));
 
         sql = "SELECT a.k1, b.k2 FROM (SELECT 1 as k1 from baseall) a RIGHT OUTER JOIN (select k1, 999 as k2 from baseall) b ON (a.k1=b.k1)";
         explainString = getSQLPlanOrErrorMsg("EXPLAIN " + sql);
-        Assert.assertTrue(explainString.contains("1\n" + "    999"));
+        Assert.assertTrue(explainString.contains("<slot 5>\n" + "    <slot 7>"));
 
         sql = "SELECT a.k1, b.k2 FROM (SELECT 1 as k1 from baseall) a FULL JOIN (select k1, 999 as k2 from baseall) b ON (a.k1=b.k1)";
         explainString = getSQLPlanOrErrorMsg("EXPLAIN " + sql);
-        Assert.assertTrue(explainString.contains("1\n" + "    999"));
+        Assert.assertTrue(explainString.contains("<slot 5>\n" + "    <slot 7>"));
     }
 
     @Test
@@ -2189,5 +2195,65 @@ public class QueryPlanTest extends TestWithFeService {
         String queryTableStr = "explain select id,orthogonal_bitmap_union_count(id3) from test.bitmap_tb t1 group by id";
         String explainString2 = getSQLPlanOrErrorMsg(queryTableStr);
         Assert.assertTrue(explainString2.contains("PREAGGREGATION: ON"));
+    }
+
+    @Test
+    public void testPreaggregationOfHllUnion() throws Exception {
+        connectContext.setDatabase("default_cluster:test");
+        createTable("create table test.test_hll(\n"
+                + "    dt date,\n"
+                + "    id int,\n"
+                + "    name char(10),\n"
+                + "    province char(10),\n"
+                + "    os char(10),\n"
+                + "    pv hll hll_union\n"
+                + ")\n"
+                + "Aggregate KEY (dt,id,name,province,os)\n"
+                + "distributed by hash(id) buckets 10\n"
+                + "PROPERTIES(\n"
+                + "    \"replication_num\" = \"1\",\n"
+                + "    \"in_memory\"=\"false\"\n"
+                + ");");
+
+        String queryBaseTableStr = "explain select dt, hll_union(pv) from test.test_hll group by dt";
+        String explainString = getSQLPlanOrErrorMsg(queryBaseTableStr);
+        Assert.assertTrue(explainString.contains("PREAGGREGATION: ON"));
+    }
+
+    @Test
+    public void testRewriteOrToIn() throws Exception {
+        connectContext.setDatabase("default_cluster:test");
+        String sql = "SELECT * from test1 where query_time = 1 or query_time = 2 or query_time in (3, 4)";
+        String explainString = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, "EXPLAIN " + sql);
+        Assert.assertTrue(explainString.contains("PREDICATES: `query_time` IN (1, 2, 3, 4)"));
+
+        sql = "SELECT * from test1 where (query_time = 1 or query_time = 2) and query_time in (3, 4)";
+        explainString = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, "EXPLAIN " + sql);
+        Assert.assertTrue(explainString.contains("PREDICATES: `query_time` IN (1, 2), `query_time` IN (3, 4)"));
+
+        sql = "SELECT * from test1 where (query_time = 1 or query_time = 2 or scan_bytes = 2) and scan_bytes in (2, 3)";
+        explainString = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, "EXPLAIN " + sql);
+        Assert.assertTrue(explainString.contains("PREDICATES: (`query_time` = 1 OR `query_time` = 2 OR `scan_bytes` = 2), `scan_bytes` IN (2, 3)"));
+
+        sql = "SELECT * from test1 where (query_time = 1 or query_time = 2) and (scan_bytes = 2 or scan_bytes = 3)";
+        explainString = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, "EXPLAIN " + sql);
+        Assert.assertTrue(explainString.contains("PREDICATES: `query_time` IN (1, 2), `scan_bytes` IN (2, 3)"));
+
+        sql = "SELECT * from test1 where query_time = 1 or query_time = 2 or query_time = 3 or query_time = 1";
+        explainString = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, "EXPLAIN " + sql);
+        Assert.assertTrue(explainString.contains("PREDICATES: `query_time` IN (1, 2, 3)"));
+
+        sql = "SELECT * from test1 where query_time = 1 or query_time = 2 or query_time in (3, 2)";
+        explainString = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, "EXPLAIN " + sql);
+        Assert.assertTrue(explainString.contains("PREDICATES: `query_time` IN (1, 2, 3)"));
+
+        connectContext.getSessionVariable().setRewriteOrToInPredicateThreshold(100);
+        sql = "SELECT * from test1 where query_time = 1 or query_time = 2 or query_time in (3, 4)";
+        explainString = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, "EXPLAIN " + sql);
+        Assert.assertTrue(explainString.contains("PREDICATES: (`query_time` = 1 OR `query_time` = 2 OR `query_time` IN (3, 4))"));
+
+        sql = "SELECT * from test1 where (query_time = 1 or query_time = 2) and query_time in (3, 4)";
+        explainString = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, "EXPLAIN " + sql);
+        Assert.assertTrue(explainString.contains("PREDICATES: (`query_time` = 1 OR `query_time` = 2), `query_time` IN (3, 4)"));
     }
 }

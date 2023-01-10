@@ -17,9 +17,9 @@
 
 package org.apache.doris.nereids.rules.expression.rewrite;
 
+import org.apache.doris.nereids.rules.expression.rewrite.rules.NormalizeBinaryPredicatesRule;
 import org.apache.doris.nereids.trees.expressions.Expression;
-
-import com.google.common.collect.Lists;
+import org.apache.doris.qe.ConnectContext;
 
 import java.util.List;
 import java.util.Optional;
@@ -33,14 +33,13 @@ public class ExpressionRuleExecutor {
     private final ExpressionRewriteContext ctx;
     private final List<ExpressionRewriteRule> rules;
 
-    public ExpressionRuleExecutor(List<ExpressionRewriteRule> rules) {
+    public ExpressionRuleExecutor(List<ExpressionRewriteRule> rules, ConnectContext context) {
         this.rules = rules;
-        this.ctx = new ExpressionRewriteContext();
+        this.ctx = new ExpressionRewriteContext(context);
     }
 
-    public ExpressionRuleExecutor(ExpressionRewriteRule rule) {
-        this.rules = Lists.newArrayList(rule);
-        this.ctx = new ExpressionRewriteContext();
+    public ExpressionRuleExecutor(List<ExpressionRewriteRule> rules) {
+        this(rules, null);
     }
 
     public List<Expression> rewrite(List<Expression> exprs) {
@@ -67,6 +66,10 @@ public class ExpressionRuleExecutor {
 
     private Expression applyRule(Expression expr, ExpressionRewriteRule rule) {
         return rule.rewrite(expr, ctx);
+    }
+
+    public static Expression normalize(Expression expression) {
+        return NormalizeBinaryPredicatesRule.INSTANCE.rewrite(expression, null);
     }
 
 }

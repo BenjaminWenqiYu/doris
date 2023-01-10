@@ -58,8 +58,10 @@ under the License.
 | apache/incubator-doris:build-env-latest | before [0efef1b](https://github.com/apache/doris/commit/0efef1b332300887ee0473f9df9bdd9d7297d824) | |
 | apache/doris:build-env-for-1.0.0| | 1.0.0 |
 | apache/doris:build-env-for-1.1.0| | 1.1.0 |
-| apache/doris:build-env-ldb-toolchain-latest | | 1.1.x, trunk |
-| apache/doris:build-env-ldb-toolchain-no-avx2-latest | | 1.1.x, trunk |
+| apache/doris:build-env-for-1.2| | 1.1.x, 1.2.x |
+| apache/doris:build-env-for-1.2-no-avx2| | 1.1.x, 1.2.x |
+| apache/doris:build-env-ldb-toolchain-latest | | trunk |
+| apache/doris:build-env-ldb-toolchain-no-avx2-latest | | trunk |
 
 **注意**：
 
@@ -104,8 +106,6 @@ under the License.
    启动镜像后，你应该已经处于容器内。可以通过以下命令下载 Doris 源码（已挂载本地源码目录则不用）：
 
     ```
-    $ wget https://dist.apache.org/repos/dist/dev/doris/xxx.tar.gz
-    or
     $ git clone https://github.com/apache/doris.git
     ```
 
@@ -135,7 +135,7 @@ under the License.
    >
    >如果你是第一次使用 `build-env-for-0.15.0` 或之后的版本，第一次编译的时候要使用如下命令：
    >
-   > `sh build.sh --clean --be --fe --ui`
+   > `sh build.sh --clean --be --fe`
    >
    > 这是因为 build-env-for-0.15.0 版本镜像升级了 thrift(0.9 -> 0.13)，需要通过 --clean 命令强制使用新版本的 thrift 生成代码文件，否则会出现不兼容的代码。
    

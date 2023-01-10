@@ -19,6 +19,7 @@
 
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <shared_mutex>
 #include <string>
@@ -79,11 +80,11 @@ public:
     // Used in clone task, to update local meta when finishing a clone job
     Status revise_tablet_meta(const std::vector<RowsetMetaSharedPtr>& rowsets_to_clone,
                               const std::vector<Version>& versions_to_delete);
-    Status pick_quick_compaction_rowsets(std::vector<RowsetSharedPtr>* input_rowsets,
-                                         int64_t* permits);
 
     const int64_t cumulative_layer_point() const;
     void set_cumulative_layer_point(int64_t new_point);
+    inline const int64_t cumulative_promotion_size() const;
+    inline void set_cumulative_promotion_size(int64_t new_size);
 
     // Disk space occupied by tablet, contain local and remote.
     size_t tablet_footprint();
@@ -94,6 +95,7 @@ public:
 
     size_t num_rows();
     int version_count() const;
+    bool exceed_version_limit(int32_t limit) const;
     Version max_version() const;
     Version max_version_unlocked() const;
     CumulativeCompactionPolicy* cumulative_compaction_policy();
@@ -112,7 +114,6 @@ public:
     double bloom_filter_fpp() const;
     size_t next_unique_id() const;
     size_t row_size() const;
-    int32_t field_index(const std::string& field_name) const;
 
     // operation in rowsets
     Status add_rowset(RowsetSharedPtr rowset);
@@ -210,10 +211,6 @@ public:
         _last_cumu_compaction_success_millis = millis;
     }
 
-    void set_last_quick_compaction_success_time(int64_t millis) {
-        _last_quick_compaction_success_time_millis = millis;
-    }
-
     int64_t last_base_compaction_success_time() { return _last_base_compaction_success_millis; }
     void set_last_base_compaction_success_time(int64_t millis) {
         _last_base_compaction_success_millis = millis;
@@ -228,12 +225,8 @@ public:
 
     TabletInfo get_tablet_info() const;
 
-    void pick_candidate_rowsets_to_cumulative_compaction(
-            std::vector<RowsetSharedPtr>* candidate_rowsets,
-            std::shared_lock<std::shared_mutex>& /* meta lock*/);
-    void pick_candidate_rowsets_to_base_compaction(
-            std::vector<RowsetSharedPtr>* candidate_rowsets,
-            std::shared_lock<std::shared_mutex>& /* meta lock*/);
+    std::vector<RowsetSharedPtr> pick_candidate_rowsets_to_cumulative_compaction();
+    std::vector<RowsetSharedPtr> pick_candidate_rowsets_to_base_compaction();
 
     void calculate_cumulative_point();
     // TODO(ygl):
@@ -263,8 +256,6 @@ public:
     // return a json string to show the compaction status of this tablet
     void get_compaction_status(std::string* json_result);
 
-    double calculate_scan_frequency();
-
     Status prepare_compaction_and_calculate_permits(CompactionType compaction_type,
                                                     TabletSharedPtr tablet, int64_t* permits);
     void execute_compaction(CompactionType compaction_type);
@@ -289,20 +280,18 @@ public:
 
     TabletSchemaSPtr tablet_schema() const override;
 
+    TabletSchemaSPtr get_max_version_schema(std::lock_guard<std::shared_mutex>&);
+
     // Find the related rowset with specified version and return its tablet schema
     TabletSchemaSPtr tablet_schema(Version version) const {
         return _tablet_meta->tablet_schema(version);
     }
 
-    Status create_rowset_writer(const Version& version, const RowsetStatePB& rowset_state,
-                                const SegmentsOverlapPB& overlap, TabletSchemaSPtr tablet_schema,
-                                int64_t oldest_write_timestamp, int64_t newest_write_timestamp,
+    Status create_rowset_writer(RowsetWriterContext& context,
                                 std::unique_ptr<RowsetWriter>* rowset_writer);
 
-    Status create_rowset_writer(const int64_t& txn_id, const PUniqueId& load_id,
-                                const RowsetStatePB& rowset_state, const SegmentsOverlapPB& overlap,
-                                TabletSchemaSPtr tablet_schema,
-                                std::unique_ptr<RowsetWriter>* rowset_writer);
+    Status create_vertical_rowset_writer(RowsetWriterContext& context,
+                                         std::unique_ptr<RowsetWriter>* rowset_writer);
 
     Status create_rowset(RowsetMetaSharedPtr rowset_meta, RowsetSharedPtr* rowset);
     // Cooldown to remote fs.
@@ -335,7 +324,7 @@ public:
     Status update_delete_bitmap_without_lock(const RowsetSharedPtr& rowset);
     Status update_delete_bitmap(const RowsetSharedPtr& rowset, DeleteBitmapPtr delete_bitmap,
                                 const RowsetIdUnorderedSet& pre_rowset_ids);
-    RowsetIdUnorderedSet all_rs_id() const;
+    RowsetIdUnorderedSet all_rs_id(int64_t max_version) const;
 
     void remove_self_owned_remote_rowsets();
 
@@ -347,6 +336,13 @@ public:
                                      int64_t num_segments);
 
     bool check_all_rowset_segment();
+
+    void update_max_version_schema(const TabletSchemaSPtr& tablet_schema);
+
+    void set_skip_compaction(bool skip,
+                             CompactionType compaction_type = CompactionType::CUMULATIVE_COMPACTION,
+                             int64_t start = -1);
+    bool should_skip_compaction(CompactionType compaction_type, int64_t now);
 
 private:
     Status _init_once_action();
@@ -375,9 +371,10 @@ private:
     bool _reconstruct_version_tracker_if_necessary();
     void _init_context_common_fields(RowsetWriterContext& context);
 
-    bool _check_pk_in_pre_segments(const std::vector<segment_v2::SegmentSharedPtr>& pre_segments,
-                                   const Slice& key, const Version& version,
-                                   DeleteBitmapPtr delete_bitmap);
+    Status _check_pk_in_pre_segments(RowsetId rowset_id,
+                                     const std::vector<segment_v2::SegmentSharedPtr>& pre_segments,
+                                     const Slice& key, const Version& version,
+                                     DeleteBitmapPtr delete_bitmap, RowLocation* loc);
     void _rowset_ids_difference(const RowsetIdUnorderedSet& cur, const RowsetIdUnorderedSet& pre,
                                 RowsetIdUnorderedSet* to_add, RowsetIdUnorderedSet* to_del);
     Status _load_rowset_segments(const RowsetSharedPtr& rowset,
@@ -429,22 +426,14 @@ private:
     std::atomic<int64_t> _last_cumu_compaction_success_millis;
     // timestamp of last base compaction success
     std::atomic<int64_t> _last_base_compaction_success_millis;
-    std::atomic<int64_t> _last_quick_compaction_success_time_millis;
     std::atomic<int64_t> _cumulative_point;
+    std::atomic<int64_t> _cumulative_promotion_size;
     std::atomic<int32_t> _newly_created_rowset_num;
     std::atomic<int64_t> _last_checkpoint_time;
 
     // cumulative compaction policy
     std::shared_ptr<CumulativeCompactionPolicy> _cumulative_compaction_policy;
     std::string _cumulative_compaction_type;
-
-    // the value of metric 'query_scan_count' and timestamp will be recorded when every time
-    // 'config::tablet_scan_frequency_time_node_interval_second' passed to calculate tablet
-    // scan frequency.
-    // the value of metric 'query_scan_count' for the last record.
-    int64_t _last_record_scan_count;
-    // the timestamp of the last record.
-    time_t _last_record_scan_count_timestamp;
 
     std::shared_ptr<CumulativeCompaction> _cumulative_compaction;
     std::shared_ptr<BaseCompaction> _base_compaction;
@@ -456,6 +445,15 @@ private:
 
     // Remote rowsets not shared by other BE. We can delete them when drop tablet.
     std::unordered_set<RowsetSharedPtr> _self_owned_remote_rowsets; // guarded by _meta_lock
+
+    // Max schema_version schema from Rowset or FE
+    TabletSchemaSPtr _max_version_schema;
+
+    bool _skip_cumu_compaction = false;
+    int64_t _skip_cumu_compaction_ts;
+
+    bool _skip_base_compaction = false;
+    int64_t _skip_base_compaction_ts;
 
     DISALLOW_COPY_AND_ASSIGN(Tablet);
 
@@ -495,6 +493,14 @@ inline void Tablet::set_cumulative_layer_point(int64_t new_point) {
             << "Unexpected cumulative point: " << new_point
             << ", origin: " << _cumulative_point.load();
     _cumulative_point = new_point;
+}
+
+inline const int64_t Tablet::cumulative_promotion_size() const {
+    return _cumulative_promotion_size;
+}
+
+inline void Tablet::set_cumulative_promotion_size(int64_t new_size) {
+    _cumulative_promotion_size = new_size;
 }
 
 inline bool Tablet::enable_unique_key_merge_on_write() const {
@@ -584,10 +590,6 @@ inline double Tablet::bloom_filter_fpp() const {
 
 inline size_t Tablet::next_unique_id() const {
     return _schema->next_column_unique_id();
-}
-
-inline int32_t Tablet::field_index(const std::string& field_name) const {
-    return _schema->field_index(field_name);
 }
 
 inline size_t Tablet::row_size() const {

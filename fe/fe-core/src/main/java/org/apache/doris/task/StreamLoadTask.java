@@ -30,7 +30,7 @@ import org.apache.doris.common.UserException;
 import org.apache.doris.common.util.SqlParserUtils;
 import org.apache.doris.common.util.TimeUtils;
 import org.apache.doris.load.loadv2.LoadTask;
-import org.apache.doris.qe.VariableMgr;
+import org.apache.doris.thrift.TFileCompressType;
 import org.apache.doris.thrift.TFileFormatType;
 import org.apache.doris.thrift.TFileType;
 import org.apache.doris.thrift.TStreamLoadPutRequest;
@@ -53,6 +53,7 @@ public class StreamLoadTask implements LoadTaskInfo {
     private long txnId;
     private TFileType fileType;
     private TFileFormatType formatType;
+    private TFileCompressType compressType = TFileCompressType.UNKNOWN;
     private boolean stripOuterArray;
     private boolean numAsString;
     private String jsonPaths;
@@ -67,6 +68,7 @@ public class StreamLoadTask implements LoadTaskInfo {
     private Separator lineDelimiter;
     private PartitionNames partitions;
     private String path;
+    private long fileSize = 0;
     private boolean negative;
     private boolean strictMode = false; // default is false
     private String timezone = TimeUtils.DEFAULT_TIME_ZONE;
@@ -80,12 +82,15 @@ public class StreamLoadTask implements LoadTaskInfo {
     private boolean loadToSingleTablet = false;
     private String headerType = "";
     private List<String> hiddenColumns;
+    private boolean trimDoubleQuotes = false;
 
-    public StreamLoadTask(TUniqueId id, long txnId, TFileType fileType, TFileFormatType formatType) {
+    public StreamLoadTask(TUniqueId id, long txnId, TFileType fileType, TFileFormatType formatType,
+            TFileCompressType compressType) {
         this.id = id;
         this.txnId = txnId;
         this.fileType = fileType;
         this.formatType = formatType;
+        this.compressType = compressType;
         this.jsonPaths = "";
         this.jsonRoot = "";
         this.stripOuterArray = false;
@@ -108,6 +113,10 @@ public class StreamLoadTask implements LoadTaskInfo {
 
     public TFileFormatType getFormatType() {
         return formatType;
+    }
+
+    public TFileCompressType getCompressType() {
+        return compressType;
     }
 
     public ImportColumnDescs getColumnExprDescs() {
@@ -150,6 +159,11 @@ public class StreamLoadTask implements LoadTaskInfo {
 
     public String getPath() {
         return path;
+    }
+
+    @Override
+    public long getFileSize() {
+        return fileSize;
     }
 
     public boolean getNegative() {
@@ -227,6 +241,7 @@ public class StreamLoadTask implements LoadTaskInfo {
         return !Strings.isNullOrEmpty(sequenceCol);
     }
 
+
     @Override
     public String getSequenceCol() {
         return sequenceCol;
@@ -237,10 +252,19 @@ public class StreamLoadTask implements LoadTaskInfo {
         return hiddenColumns;
     }
 
+    @Override
+    public boolean getTrimDoubleQuotes() {
+        return trimDoubleQuotes;
+    }
+
     public static StreamLoadTask fromTStreamLoadPutRequest(TStreamLoadPutRequest request) throws UserException {
         StreamLoadTask streamLoadTask = new StreamLoadTask(request.getLoadId(), request.getTxnId(),
-                                                           request.getFileType(), request.getFormatType());
+                request.getFileType(), request.getFormatType(),
+                request.getCompressType());
         streamLoadTask.setOptionalFromTSLPutRequest(request);
+        if (request.isSetFileSize()) {
+            streamLoadTask.fileSize = request.getFileSize();
+        }
         return streamLoadTask;
     }
 
@@ -291,8 +315,6 @@ public class StreamLoadTask implements LoadTaskInfo {
         }
         if (request.isSetExecMemLimit()) {
             execMemLimit = request.getExecMemLimit();
-        } else {
-            execMemLimit = VariableMgr.getDefaultSessionVariable().getLoadMemLimit();
         }
         if (request.getFormatType() == TFileFormatType.FORMAT_JSON) {
             if (request.getJsonpaths() != null) {
@@ -333,6 +355,9 @@ public class StreamLoadTask implements LoadTaskInfo {
         }
         if (request.isSetHiddenColumns()) {
             hiddenColumns = Arrays.asList(request.getHiddenColumns().replaceAll("\\s+", "").split(","));
+        }
+        if (request.isSetTrimDoubleQuotes()) {
+            trimDoubleQuotes = request.isTrimDoubleQuotes();
         }
     }
 
@@ -410,3 +435,4 @@ public class StreamLoadTask implements LoadTaskInfo {
         return maxFilterRatio;
     }
 }
+

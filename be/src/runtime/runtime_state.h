@@ -20,20 +20,13 @@
 
 #pragma once
 
-#include <atomic>
 #include <fstream>
-#include <memory>
-#include <mutex>
-#include <sstream>
-#include <string>
-#include <vector>
 
 #include "cctz/time_zone.h"
 #include "common/global_types.h"
 #include "common/object_pool.h"
 #include "gen_cpp/PaloInternalService_types.h" // for TQueryOptions
 #include "gen_cpp/Types_types.h"               // for TUniqueId
-#include "runtime/mem_pool.h"
 #include "runtime/query_fragments_ctx.h"
 #include "runtime/thread_resource_mgr.h"
 #include "util/runtime_profile.h"
@@ -83,17 +76,13 @@ public:
     Status init(const TUniqueId& fragment_instance_id, const TQueryOptions& query_options,
                 const TQueryGlobals& query_globals, ExecEnv* exec_env);
 
-    // Set up four-level hierarchy of mem trackers: process, query, fragment instance.
-    // The instance tracker is tied to our profile.
-    // Specific parts of the fragment (i.e. exec nodes, sinks, data stream senders, etc)
-    // will add a fourth level when they are initialized.
-    Status init_mem_trackers(const TUniqueId& query_id);
-
-    // for ut only
-    Status init_instance_mem_tracker();
-
-    // Gets/Creates the query wide block mgr.
-    Status create_block_mgr();
+    // after SCOPED_ATTACH_TASK;
+    void init_scanner_mem_trackers() {
+        _scanner_mem_tracker = std::make_shared<MemTracker>(
+                fmt::format("Scanner#QueryId={}", print_id(_query_id)));
+    }
+    // for ut and non-query.
+    Status init_mem_trackers(const TUniqueId& query_id = TUniqueId());
 
     Status create_load_dir();
 
@@ -123,7 +112,7 @@ public:
     const TUniqueId& fragment_instance_id() const { return _fragment_instance_id; }
     ExecEnv* exec_env() { return _exec_env; }
     std::shared_ptr<MemTrackerLimiter> query_mem_tracker() { return _query_mem_tracker; }
-    std::shared_ptr<MemTrackerLimiter> instance_mem_tracker() { return _instance_mem_tracker; }
+    std::shared_ptr<MemTracker> scanner_mem_tracker() { return _scanner_mem_tracker; }
     ThreadResourceMgr::ResourcePool* resource_pool() { return _resource_pool; }
 
     void set_fragment_root_id(PlanNodeId id) {
@@ -146,6 +135,11 @@ public:
                _query_options.enable_function_pushdown;
     }
 
+    bool check_overflow_for_decimal() const {
+        return _query_options.__isset.check_overflow_for_decimal &&
+               _query_options.check_overflow_for_decimal;
+    }
+
     // Create a codegen object in _codegen. No-op if it has already been called.
     // If codegen is enabled for the query, this is created when the runtime
     // state is created. If codegen is disabled for the query, this is created
@@ -165,9 +159,6 @@ public:
     // Appends error to the _error_log if there is space
     bool log_error(const std::string& error);
 
-    // If !status.ok(), appends the error to the _error_log
-    void log_error(const Status& status);
-
     // Returns true if the error log has not reached _max_errors.
     bool log_has_space() {
         std::lock_guard<std::mutex> l(_error_log_lock);
@@ -184,9 +175,9 @@ public:
     // _unreported_error_idx to _errors_log.size()
     void get_unreported_errors(std::vector<std::string>* new_errors);
 
-    bool is_cancelled() const { return _is_cancelled; }
+    bool is_cancelled() const { return _is_cancelled.load(); }
     int codegen_level() const { return _query_options.codegen_level; }
-    void set_is_cancelled(bool v) { _is_cancelled = v; }
+    void set_is_cancelled(bool v) { _is_cancelled.store(v); }
 
     void set_backend_id(int64_t backend_id) { _backend_id = backend_id; }
     int64_t backend_id() const { return _backend_id; }
@@ -326,7 +317,16 @@ public:
 
     int32_t runtime_filter_max_in_num() const { return _query_options.runtime_filter_max_in_num; }
 
-    bool enable_vectorized_exec() const { return _query_options.enable_vectorized_engine; }
+    int be_exec_version() const {
+        if (!_query_options.__isset.be_exec_version) {
+            return 0;
+        }
+        return _query_options.be_exec_version;
+    }
+    bool enable_pipeline_exec() const {
+        return _query_options.__isset.enable_pipeline_engine &&
+               _query_options.enable_pipeline_engine;
+    }
 
     bool trim_tailing_spaces_for_external_table_query() const {
         return _query_options.trim_tailing_spaces_for_external_table_query;
@@ -340,7 +340,7 @@ public:
         return _query_options.enable_enable_exchange_node_parallel_merge;
     }
 
-    segment_v2::CompressionTypePB fragement_transmission_compression_type() {
+    segment_v2::CompressionTypePB fragement_transmission_compression_type() const {
         if (_query_options.__isset.fragment_transmission_compression_codec) {
             if (_query_options.fragment_transmission_compression_codec == "lz4") {
                 return segment_v2::CompressionTypePB::LZ4;
@@ -356,6 +356,13 @@ public:
 
     bool skip_delete_predicate() const {
         return _query_options.__isset.skip_delete_predicate && _query_options.skip_delete_predicate;
+    }
+
+    int partitioned_hash_join_rows_threshold() const {
+        if (!_query_options.__isset.partitioned_hash_join_rows_threshold) {
+            return 0;
+        }
+        return _query_options.partitioned_hash_join_rows_threshold;
     }
 
     const std::vector<TTabletCommitInfo>& tablet_commit_infos() const {
@@ -381,11 +388,31 @@ public:
 
     QueryFragmentsCtx* get_query_fragments_ctx() { return _query_ctx; }
 
+    void set_query_mem_tracker(const std::shared_ptr<MemTrackerLimiter>& tracker) {
+        _query_mem_tracker = tracker;
+    }
+
     OpentelemetryTracer get_tracer() { return _tracer; }
 
     void set_tracer(OpentelemetryTracer&& tracer) { _tracer = std::move(tracer); }
 
     bool enable_profile() const { return _query_options.is_report_success; }
+
+    bool enable_share_hash_table_for_broadcast_join() const {
+        return _query_options.__isset.enable_share_hash_table_for_broadcast_join &&
+               _query_options.enable_share_hash_table_for_broadcast_join;
+    }
+
+    int repeat_max_num() const {
+#ifndef BE_TEST
+        if (!_query_options.__isset.repeat_max_num) {
+            return 10000;
+        }
+        return _query_options.repeat_max_num;
+#else
+        return 10;
+#endif
+    }
 
 private:
     // Use a custom block manager for the query for testing purposes.
@@ -397,12 +424,9 @@ private:
 
     static const int DEFAULT_BATCH_SIZE = 2048;
 
-    // MemTracker that is shared by all fragment instances running on this host.
-    // The query mem tracker must be released after the _instance_mem_tracker.
     std::shared_ptr<MemTrackerLimiter> _query_mem_tracker;
-
-    // Memory usage of this fragment instance
-    std::shared_ptr<MemTrackerLimiter> _instance_mem_tracker;
+    // Count the memory consumption of Scanner
+    std::shared_ptr<MemTracker> _scanner_mem_tracker;
 
     // put runtime state before _obj_pool, so that it will be deconstructed after
     // _obj_pool. Because some of object in _obj_pool will use profile when deconstructing.
@@ -452,7 +476,7 @@ private:
     ThreadResourceMgr::ResourcePool* _resource_pool;
 
     // if true, execution should stop with a CANCELLED status
-    bool _is_cancelled;
+    std::atomic<bool> _is_cancelled;
 
     int _per_fragment_instance_idx;
     int _num_per_fragment_instances = 0;

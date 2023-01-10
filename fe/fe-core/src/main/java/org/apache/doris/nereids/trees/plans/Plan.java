@@ -21,15 +21,19 @@ import org.apache.doris.nereids.memo.GroupExpression;
 import org.apache.doris.nereids.properties.LogicalProperties;
 import org.apache.doris.nereids.properties.UnboundLogicalProperties;
 import org.apache.doris.nereids.trees.TreeNode;
+import org.apache.doris.nereids.trees.expressions.ExprId;
 import org.apache.doris.nereids.trees.expressions.Expression;
+import org.apache.doris.nereids.trees.expressions.NamedExpression;
 import org.apache.doris.nereids.trees.expressions.Slot;
 import org.apache.doris.nereids.trees.plans.visitor.PlanVisitor;
 
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * Abstract class for all plan node.
@@ -68,15 +72,32 @@ public interface Plan extends TreeNode<Plan> {
     }
 
     /**
+     * Get extra plans.
+     */
+    default List<Plan> extraPlans() {
+        return ImmutableList.of();
+    }
+
+    default boolean displayExtraPlanFirst() {
+        return false;
+    }
+
+    /**
      * Get output slot list of the plan.
      */
     List<Slot> getOutput();
+
+    List<Slot> getNonUserVisibleOutput();
 
     /**
      * Get output slot set of the plan.
      */
     default Set<Slot> getOutputSet() {
         return ImmutableSet.copyOf(getOutput());
+    }
+
+    default Set<ExprId> getOutputExprIdSet() {
+        return getOutput().stream().map(NamedExpression::getExprId).collect(Collectors.toSet());
     }
 
     /**
@@ -93,6 +114,10 @@ public interface Plan extends TreeNode<Plan> {
 
     default List<Slot> computeOutput() {
         throw new IllegalStateException("Not support compute output for " + getClass().getName());
+    }
+
+    default List<Slot> computeNonUserVisibleOutput() {
+        return ImmutableList.of();
     }
 
     String treeString();

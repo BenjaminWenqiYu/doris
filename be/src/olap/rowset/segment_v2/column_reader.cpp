@@ -142,6 +142,15 @@ Status ColumnReader::new_bitmap_index_iterator(BitmapIndexIterator** iterator) {
     return Status::OK();
 }
 
+Status ColumnReader::new_inverted_index_iterator(const TabletIndex* index_meta,
+                                                 InvertedIndexIterator** iterator) {
+    RETURN_IF_ERROR(_ensure_inverted_index_loaded(index_meta));
+    if (_inverted_index) {
+        RETURN_IF_ERROR(_inverted_index->new_iterator(index_meta, iterator));
+    }
+    return Status::OK();
+}
+
 Status ColumnReader::read_page(const ColumnIteratorOptions& iter_opts, const PagePointer& pp,
                                PageHandle* handle, Slice* page_body, PageFooterPB* footer,
                                BlockCompressionCodec* codec) const {
@@ -156,6 +165,7 @@ Status ColumnReader::read_page(const ColumnIteratorOptions& iter_opts, const Pag
     opts.kept_in_memory = _opts.kept_in_memory;
     opts.type = iter_opts.type;
     opts.encoding_info = _encoding_info;
+    opts.io_ctx = iter_opts.io_ctx;
 
     return PageIO::read_and_decompress_page(opts, handle, page_body, footer);
 }
@@ -168,6 +178,44 @@ Status ColumnReader::get_row_ranges_by_zone_map(
     std::vector<uint32_t> page_indexes;
     RETURN_IF_ERROR(_get_filtered_pages(col_predicates, delete_predicates, &page_indexes));
     RETURN_IF_ERROR(_calculate_row_ranges(page_indexes, row_ranges));
+    return Status::OK();
+}
+
+Status ColumnReader::next_batch_of_zone_map(size_t* n, vectorized::MutableColumnPtr& dst) const {
+    // TODO: this work to get min/max value seems should only do once
+    FieldType type = _type_info->type();
+    std::unique_ptr<WrapperField> min_value(WrapperField::create_by_type(type, _meta.length()));
+    std::unique_ptr<WrapperField> max_value(WrapperField::create_by_type(type, _meta.length()));
+    _parse_zone_map(_zone_map_index_meta->segment_zone_map(), min_value.get(), max_value.get());
+
+    dst->reserve(*n);
+    bool is_string = is_olap_string_type(type);
+    if (max_value->is_null()) {
+        assert_cast<vectorized::ColumnNullable&>(*dst).insert_default();
+    } else {
+        if (is_string) {
+            auto sv = (StringValue*)max_value->cell_ptr();
+            dst->insert_data(sv->ptr, sv->len);
+        } else {
+            dst->insert_many_fix_len_data(static_cast<const char*>(max_value->cell_ptr()), 1);
+        }
+    }
+
+    auto size = *n - 1;
+    if (min_value->is_null()) {
+        assert_cast<vectorized::ColumnNullable&>(*dst).insert_null_elements(size);
+    } else {
+        if (is_string) {
+            auto sv = (StringValue*)min_value->cell_ptr();
+            dst->insert_many_data(sv->ptr, sv->len, size);
+        } else {
+            // TODO: the work may cause performance problem, opt latter
+            for (int i = 0; i < size; ++i) {
+                dst->insert_many_fix_len_data(static_cast<const char*>(min_value->cell_ptr()), 1);
+            }
+        }
+    }
+
     return Status::OK();
 }
 
@@ -236,8 +284,10 @@ Status ColumnReader::_get_filtered_pages(const AndBlockColumnPredicate* col_pred
                 bool should_read = true;
                 if (delete_predicates != nullptr) {
                     for (auto del_pred : *delete_predicates) {
-                        if (min_value.get() == nullptr || max_value.get() == nullptr ||
-                            del_pred->evaluate_and({min_value.get(), max_value.get()})) {
+                        // TODO: Both `min_value` and `max_value` should be 0 or neither should be 0.
+                        //  So nullable only need to judge once.
+                        if (min_value.get() != nullptr && max_value.get() != nullptr &&
+                            del_pred->evaluate_del({min_value.get(), max_value.get()})) {
                             should_read = false;
                             break;
                         }
@@ -317,6 +367,32 @@ Status ColumnReader::_load_bitmap_index(bool use_page_cache, bool kept_in_memory
         _bitmap_index.reset(new BitmapIndexReader(_file_reader, _bitmap_index_meta));
         return _bitmap_index->load(use_page_cache, kept_in_memory);
     }
+    return Status::OK();
+}
+
+Status ColumnReader::_load_inverted_index_index(const TabletIndex* index_meta) {
+    std::lock_guard<std::mutex> wlock(_load_index_lock);
+
+    if (_inverted_index && index_meta &&
+        _inverted_index->get_index_id() == index_meta->index_id()) {
+        return Status::OK();
+    }
+
+    FieldType type;
+    if ((FieldType)_meta.type() == FieldType::OLAP_FIELD_TYPE_ARRAY) {
+        type = (FieldType)_meta.children_columns(0).type();
+    } else {
+        type = _type_info->type();
+    }
+
+    if (is_string_type(type)) {
+        // todo(wy): implement
+    } else if (is_numeric_type(type)) {
+        // todo(wy): implement
+    } else {
+        _inverted_index.reset();
+    }
+
     return Status::OK();
 }
 
@@ -575,6 +651,9 @@ FileColumnIterator::FileColumnIterator(ColumnReader* reader) : _reader(reader) {
 
 Status FileColumnIterator::init(const ColumnIteratorOptions& opts) {
     _opts = opts;
+    if (!_opts.use_page_cache) {
+        _reader->disable_index_meta_cache();
+    }
     RETURN_IF_ERROR(get_block_compression_codec(_reader->get_compression(), &_compress_codec));
     if (config::enable_low_cardinality_optimize &&
         _reader->encoding_info()->encoding() == DICT_ENCODING) {
@@ -710,9 +789,14 @@ Status FileColumnIterator::next_batch(size_t* n, ColumnBlockView* dst, bool* has
     return Status::OK();
 }
 
+Status FileColumnIterator::next_batch_of_zone_map(size_t* n, vectorized::MutableColumnPtr& dst) {
+    return _reader->next_batch_of_zone_map(n, dst);
+}
+
 Status FileColumnIterator::next_batch(size_t* n, vectorized::MutableColumnPtr& dst,
                                       bool* has_null) {
     size_t curr_size = dst->byte_size();
+    dst->reserve(*n);
     size_t remaining = *n;
     *has_null = false;
     while (remaining > 0) {
@@ -1034,7 +1118,8 @@ void DefaultValueColumnIterator::insert_default_data(const TypeInfo* type_info, 
     }
     case OLAP_FIELD_TYPE_STRING:
     case OLAP_FIELD_TYPE_VARCHAR:
-    case OLAP_FIELD_TYPE_CHAR: {
+    case OLAP_FIELD_TYPE_CHAR:
+    case OLAP_FIELD_TYPE_JSONB: {
         data_ptr = ((Slice*)mem_value)->data;
         data_len = ((Slice*)mem_value)->size;
         dst->insert_many_data(data_ptr, data_len, n);

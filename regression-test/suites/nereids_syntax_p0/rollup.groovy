@@ -18,7 +18,10 @@
 
 suite("rollup") {
     sql """
-        CREATE TABLE `rollup_t1` (
+        DROP TABLE IF EXISTS `rollup_t1`
+    """
+    sql """
+        CREATE TABLE IF NOT EXISTS `rollup_t1` (
           `k1` int(11) NULL,
           `k2` int(11) NULL,
           `k3` int(11) NULL,
@@ -56,14 +59,12 @@ suite("rollup") {
             }
         }
     }
-    Thread.sleep(200)
+    Thread.sleep(2000)
 
     sql "insert into rollup_t1 values(1, 2, 3, 4)"
     sql "insert into rollup_t1 values(1, 2, 3, 2)"
     sql "insert into rollup_t1 values(2, 3, 4, 1)"
     sql "insert into rollup_t1 values(2, 3, 4, 3)"
-
-    sql "set enable_vectorized_engine=true"
 
     sql "set enable_nereids_planner=true"
 
@@ -72,14 +73,23 @@ suite("rollup") {
     explain {
         sql("select k2, sum(v1) from rollup_t1 group by k2")
         contains("rollup_t1(r1)")
+        contains("PREAGGREGATION: ON")
     }
 
     explain {
         sql("select k1, sum(v1) from rollup_t1 group by k1")
         contains("rollup_t1(rollup_t1)")
+        contains("PREAGGREGATION: ON")
     }
 
     order_qt_rollup1 "select k2, sum(v1) from rollup_t1 group by k2"
 
     order_qt_rollup2 "select k1, sum(v1) from rollup_t1 group by k1"
+
+    explain {
+        sql("select k1, max(v1) from rollup_t1 group by k1")
+        contains("rollup_t1(rollup_t1)")
+        contains("PREAGGREGATION: OFF")
+        contains("Aggregate operator don't match, aggregate function: max(v1), column aggregate type: SUM")
+    }
 }

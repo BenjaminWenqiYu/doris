@@ -28,9 +28,13 @@ import org.apache.doris.common.ErrorCode;
 import org.apache.doris.common.ErrorReport;
 import org.apache.doris.common.Pair;
 import org.apache.doris.common.util.SqlParserUtils;
+import org.apache.doris.common.util.Util;
 import org.apache.doris.load.loadv2.LoadTask;
 import org.apache.doris.mysql.privilege.PrivPredicate;
 import org.apache.doris.qe.ConnectContext;
+import org.apache.doris.task.LoadTaskInfo;
+import org.apache.doris.thrift.TFileCompressType;
+import org.apache.doris.thrift.TFileFormatType;
 import org.apache.doris.thrift.TNetworkAddress;
 
 import com.google.common.base.Function;
@@ -94,7 +98,8 @@ public class DataDescription {
     private final PartitionNames partitionNames;
     private final List<String> filePaths;
     private final Separator columnSeparator;
-    private final String fileFormat;
+    private String fileFormat;
+    private TFileCompressType compressType = TFileCompressType.UNKNOWN;
     private final boolean isNegative;
     // column names in the path
     private final List<String> columnsFromPath;
@@ -116,7 +121,10 @@ public class DataDescription {
     private String jsonPaths = "";
     private String jsonRoot = "";
     private boolean fuzzyParse = false;
-    private boolean readJsonByLine = false;
+    // the default must be true.
+    // So that for broker load, this is always true,
+    // and for stream load, it will set on demand.
+    private boolean readJsonByLine = true;
     private boolean numAsString = false;
 
     private String sequenceCol;
@@ -137,6 +145,7 @@ public class DataDescription {
     private LoadTask.MergeType mergeType = LoadTask.MergeType.APPEND;
     private final Expr deleteCondition;
     private final Map<String, String> properties;
+    private boolean trimDoubleQuotes = false;
 
     public DataDescription(String tableName,
                            PartitionNames partitionNames,
@@ -210,9 +219,76 @@ public class DataDescription {
         this.properties = properties;
     }
 
+    // For stream load using external file scan node.
+    public DataDescription(String tableName, LoadTaskInfo taskInfo) {
+        this.tableName = tableName;
+        this.partitionNames = taskInfo.getPartitions();
+
+        if (!Strings.isNullOrEmpty(taskInfo.getPath())) {
+            this.filePaths = Lists.newArrayList(taskInfo.getPath());
+        } else {
+            // Add a dummy path to just make analyze() happy.
+            this.filePaths = Lists.newArrayList("dummy");
+        }
+
+        this.fileFieldNames = taskInfo.getColumnExprDescs().getFileColNames();
+        this.columnSeparator = taskInfo.getColumnSeparator();
+        this.lineDelimiter = taskInfo.getLineDelimiter();
+        getFileFormatAndCompressType(taskInfo);
+        this.columnsFromPath = null;
+        this.isNegative = taskInfo.getNegative();
+        this.columnMappingList = taskInfo.getColumnExprDescs().getColumnMappingList();
+        this.precedingFilterExpr = taskInfo.getPrecedingFilter();
+        this.whereExpr = taskInfo.getWhereExpr();
+        this.srcTableName = null;
+        this.mergeType = taskInfo.getMergeType();
+        this.deleteCondition = taskInfo.getDeleteCondition();
+        this.sequenceCol = taskInfo.getSequenceCol();
+        this.stripOuterArray = taskInfo.isStripOuterArray();
+        this.jsonPaths = taskInfo.getJsonPaths();
+        this.jsonRoot = taskInfo.getJsonRoot();
+        this.fuzzyParse = taskInfo.isFuzzyParse();
+        this.readJsonByLine = taskInfo.isReadJsonByLine();
+        this.numAsString = taskInfo.isNumAsString();
+        this.properties = Maps.newHashMap();
+        this.trimDoubleQuotes = taskInfo.getTrimDoubleQuotes();
+    }
+
+    private void getFileFormatAndCompressType(LoadTaskInfo taskInfo) {
+        // get file format
+        if (!Strings.isNullOrEmpty(taskInfo.getHeaderType())) {
+            // for "csv_with_name" and "csv_with_name_and_type"
+            this.fileFormat = taskInfo.getHeaderType();
+        } else {
+            TFileFormatType type = taskInfo.getFormatType();
+            if (Util.isCsvFormat(type)) {
+                // ignore the "compress type" in format, such as FORMAT_CSV_GZ
+                // the compress type is saved in "compressType"
+                this.fileFormat = "csv";
+            } else {
+                switch (type) {
+                    case FORMAT_ORC:
+                        this.fileFormat = "orc";
+                        break;
+                    case FORMAT_PARQUET:
+                        this.fileFormat = "parquet";
+                        break;
+                    case FORMAT_JSON:
+                        this.fileFormat = "json";
+                        break;
+                    default:
+                        this.fileFormat = "unknown";
+                        break;
+                }
+            }
+        }
+        // get compress type
+        this.compressType = taskInfo.getCompressType();
+    }
+
     public static void validateMappingFunction(String functionName, List<String> args,
-                                               Map<String, String> columnNameMap,
-                                               Column mappingColumn, boolean isHadoopLoad) throws AnalysisException {
+            Map<String, String> columnNameMap,
+            Column mappingColumn, boolean isHadoopLoad) throws AnalysisException {
         if (functionName.equalsIgnoreCase("alignment_timestamp")) {
             validateAlignmentTimestamp(args, columnNameMap);
         } else if (functionName.equalsIgnoreCase("strftime")) {
@@ -425,6 +501,10 @@ public class DataDescription {
         return fileFormat;
     }
 
+    public TFileCompressType getCompressType() {
+        return compressType;
+    }
+
     public List<String> getColumnsFromPath() {
         return columnsFromPath;
     }
@@ -557,6 +637,14 @@ public class DataDescription {
 
     public boolean isLoadFromTable() {
         return !Strings.isNullOrEmpty(srcTableName);
+    }
+
+    public boolean isReadJsonByLine() {
+        return readJsonByLine;
+    }
+
+    public boolean getTrimDoubleQuotes() {
+        return trimDoubleQuotes;
     }
 
     /*
@@ -716,6 +804,10 @@ public class DataDescription {
         OlapTable olapTable = db.getOlapTableOrAnalysisException(tableName);
         // no sequence column in load and table schema
         if (!hasSequenceCol() && !olapTable.hasSequenceCol()) {
+            return;
+        }
+        // table has sequence map col
+        if (olapTable.hasSequenceCol() && olapTable.getSequenceMapCol() != null) {
             return;
         }
         // check olapTable schema and sequenceCol
@@ -917,13 +1009,16 @@ public class DataDescription {
         if (columnSeparator != null) {
             sb.append(" COLUMNS TERMINATED BY ").append(columnSeparator.toSql());
         }
-        if (columnsFromPath != null && !columnsFromPath.isEmpty()) {
-            sb.append(" COLUMNS FROM PATH AS (");
-            Joiner.on(", ").appendTo(sb, columnsFromPath).append(")");
+        if (fileFormat != null && !fileFormat.isEmpty()) {
+            sb.append(" FORMAT AS '" + fileFormat + "'");
         }
         if (fileFieldNames != null && !fileFieldNames.isEmpty()) {
             sb.append(" (");
             Joiner.on(", ").appendTo(sb, fileFieldNames).append(")");
+        }
+        if (columnsFromPath != null && !columnsFromPath.isEmpty()) {
+            sb.append(" COLUMNS FROM PATH AS (");
+            Joiner.on(", ").appendTo(sb, columnsFromPath).append(")");
         }
         if (columnMappingList != null && !columnMappingList.isEmpty()) {
             sb.append(" SET (");
@@ -948,3 +1043,4 @@ public class DataDescription {
         return toSql();
     }
 }
+

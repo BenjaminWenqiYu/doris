@@ -22,13 +22,13 @@ import org.apache.doris.analysis.Expr;
 import org.apache.doris.analysis.SlotDescriptor;
 import org.apache.doris.analysis.TupleDescriptor;
 import org.apache.doris.catalog.Env;
+import org.apache.doris.catalog.EsResource;
 import org.apache.doris.catalog.EsTable;
 import org.apache.doris.catalog.PartitionInfo;
 import org.apache.doris.catalog.PartitionItem;
 import org.apache.doris.catalog.RangePartitionInfo;
 import org.apache.doris.catalog.external.EsExternalTable;
 import org.apache.doris.common.AnalysisException;
-import org.apache.doris.common.Config;
 import org.apache.doris.common.UserException;
 import org.apache.doris.external.elasticsearch.EsShardPartitions;
 import org.apache.doris.external.elasticsearch.EsShardRouting;
@@ -61,6 +61,7 @@ import org.apache.logging.log4j.Logger;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
@@ -167,20 +168,18 @@ public class EsScanNode extends ScanNode {
         msg.node_type = TPlanNodeType.ES_HTTP_SCAN_NODE;
         Map<String, String> properties = Maps.newHashMap();
         if (table.getUserName() != null) {
-            properties.put(EsTable.USER, table.getUserName());
+            properties.put(EsResource.USER, table.getUserName());
         }
         if (table.getPasswd() != null) {
-            properties.put(EsTable.PASSWORD, table.getPasswd());
+            properties.put(EsResource.PASSWORD, table.getPasswd());
         }
-        properties.put(EsTable.HTTP_SSL_ENABLED, String.valueOf(table.isHttpSslEnabled()));
+        properties.put(EsResource.HTTP_SSL_ENABLED, String.valueOf(table.isHttpSslEnabled()));
         TEsScanNode esScanNode = new TEsScanNode(desc.getId().asInt());
         if (table.isEnableDocValueScan()) {
             esScanNode.setDocvalueContext(table.docValueContext());
-            properties.put(EsTable.DOC_VALUES_MODE, String.valueOf(useDocValueScan(desc, table.docValueContext())));
+            properties.put(EsResource.DOC_VALUES_MODE, String.valueOf(useDocValueScan(desc, table.docValueContext())));
         }
-        if (Config.enable_new_es_dsl) {
-            properties.put(EsTable.QUERY_DSL, queryBuilder.toJson());
-        }
+        properties.put(EsResource.QUERY_DSL, queryBuilder.toJson());
         if (table.isEnableKeywordSniff() && table.fieldsContext().size() > 0) {
             esScanNode.setFieldsContext(table.fieldsContext());
         }
@@ -314,8 +313,8 @@ public class EsScanNode extends ScanNode {
             case RANGE: {
                 RangePartitionInfo rangePartitionInfo = (RangePartitionInfo) partitionInfo;
                 Map<Long, PartitionItem> keyRangeById = rangePartitionInfo.getIdToItem(false);
-                partitionPruner = new RangePartitionPruner(keyRangeById, rangePartitionInfo.getPartitionColumns(),
-                        columnFilters);
+                partitionPruner = new RangePartitionPrunerV2(keyRangeById, rangePartitionInfo.getPartitionColumns(),
+                        columnNameToRange);
                 return partitionPruner.prune();
             }
             case UNPARTITIONED: {
@@ -354,11 +353,16 @@ public class EsScanNode extends ScanNode {
         if (conjuncts.isEmpty()) {
             queryBuilder = QueryBuilders.matchAllQuery();
         } else {
+            // col -> col.keyword
+            Map<String, String> fieldsContext = new HashMap<>();
+            if (table.isEnableKeywordSniff() && !table.fieldsContext().isEmpty()) {
+                fieldsContext = table.fieldsContext();
+            }
             boolean hasFilter = false;
             BoolQueryBuilder boolQueryBuilder = QueryBuilders.boolQuery();
             List<Expr> notPushDownList = new ArrayList<>();
             for (Expr expr : conjuncts) {
-                QueryBuilder queryBuilder = EsUtil.toEsDsl(expr, notPushDownList);
+                QueryBuilder queryBuilder = EsUtil.toEsDsl(expr, notPushDownList, fieldsContext);
                 if (queryBuilder != null) {
                     hasFilter = true;
                     boolQueryBuilder.must(queryBuilder);
@@ -369,9 +373,7 @@ public class EsScanNode extends ScanNode {
             } else {
                 queryBuilder = boolQueryBuilder;
             }
-            if (Config.enable_new_es_dsl) {
-                conjuncts.removeIf(expr -> !notPushDownList.contains(expr));
-            }
+            conjuncts.removeIf(expr -> !notPushDownList.contains(expr));
         }
     }
 }

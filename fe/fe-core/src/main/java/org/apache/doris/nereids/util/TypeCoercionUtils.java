@@ -18,13 +18,19 @@
 package org.apache.doris.nereids.util;
 
 import org.apache.doris.nereids.annotation.Developing;
+import org.apache.doris.nereids.exceptions.AnalysisException;
+import org.apache.doris.nereids.trees.expressions.BinaryArithmetic;
+import org.apache.doris.nereids.trees.expressions.BinaryOperator;
 import org.apache.doris.nereids.trees.expressions.Cast;
 import org.apache.doris.nereids.trees.expressions.Expression;
+import org.apache.doris.nereids.trees.expressions.literal.Literal;
 import org.apache.doris.nereids.types.BigIntType;
 import org.apache.doris.nereids.types.BooleanType;
 import org.apache.doris.nereids.types.DataType;
 import org.apache.doris.nereids.types.DateTimeType;
-import org.apache.doris.nereids.types.DecimalType;
+import org.apache.doris.nereids.types.DateTimeV2Type;
+import org.apache.doris.nereids.types.DateV2Type;
+import org.apache.doris.nereids.types.DecimalV2Type;
 import org.apache.doris.nereids.types.DoubleType;
 import org.apache.doris.nereids.types.FloatType;
 import org.apache.doris.nereids.types.IntegerType;
@@ -35,6 +41,7 @@ import org.apache.doris.nereids.types.StringType;
 import org.apache.doris.nereids.types.TinyIntType;
 import org.apache.doris.nereids.types.coercion.AbstractDataType;
 import org.apache.doris.nereids.types.coercion.CharacterType;
+import org.apache.doris.nereids.types.coercion.DateLikeType;
 import org.apache.doris.nereids.types.coercion.FractionalType;
 import org.apache.doris.nereids.types.coercion.IntegralType;
 import org.apache.doris.nereids.types.coercion.NumericType;
@@ -104,10 +111,10 @@ public class TypeCoercionUtils {
             // Cast null type (usually from null literals) into target types
             returnType = expected.defaultConcreteType();
         } else if (input instanceof NumericType) {
-            if (expected instanceof DecimalType) {
+            if (expected instanceof DecimalV2Type) {
                 // If input is a numeric type but not decimal, and we expect a decimal type,
                 // cast the input to decimal.
-                returnType = DecimalType.forType(input);
+                returnType = DecimalV2Type.forType(input);
             } else if (expected instanceof DateTimeType) {
                 returnType = DateTimeType.INSTANCE;
             } else if (expected instanceof NumericType) {
@@ -115,18 +122,22 @@ public class TypeCoercionUtils {
                 returnType = expected.defaultConcreteType();
             }
         } else if (input instanceof CharacterType) {
-            if (expected instanceof DecimalType) {
-                returnType = DecimalType.SYSTEM_DEFAULT;
+            if (expected instanceof DecimalV2Type) {
+                returnType = DecimalV2Type.SYSTEM_DEFAULT;
             } else if (expected instanceof NumericType) {
                 returnType = expected.defaultConcreteType();
             } else if (expected instanceof DateTimeType) {
                 returnType = DateTimeType.INSTANCE;
             }
+        } else if (input.isDateType()) {
+            if (expected instanceof DateTimeType) {
+                returnType = expected.defaultConcreteType();
+            }
         }
 
         if (returnType == null && input instanceof PrimitiveType
                 && expected instanceof CharacterType) {
-            returnType = StringType.INSTANCE;
+            returnType = expected.defaultConcreteType();
         }
 
         // could not do implicit cast, just return null. Throw exception in check analysis.
@@ -137,18 +148,28 @@ public class TypeCoercionUtils {
      * return ture if two type could do type coercion.
      */
     public static boolean canHandleTypeCoercion(DataType leftType, DataType rightType) {
-        if (leftType instanceof DecimalType && rightType instanceof NullType) {
+        if (leftType instanceof DecimalV2Type && rightType instanceof NullType) {
             return true;
         }
-        if (leftType instanceof NullType && rightType instanceof DecimalType) {
+        if (leftType instanceof NullType && rightType instanceof DecimalV2Type) {
             return true;
         }
-        if (leftType instanceof DecimalType && rightType instanceof IntegralType
-                || leftType instanceof IntegralType && rightType instanceof DecimalType) {
+        if (leftType instanceof DecimalV2Type && rightType instanceof IntegralType
+                || leftType instanceof IntegralType && rightType instanceof DecimalV2Type) {
+            return true;
+        }
+        if (leftType instanceof FloatType && rightType instanceof DecimalV2Type
+                || leftType instanceof DecimalV2Type && rightType instanceof FloatType) {
+            return true;
+        }
+        if (leftType instanceof DoubleType && rightType instanceof DecimalV2Type
+                || leftType instanceof DecimalV2Type && rightType instanceof DoubleType) {
             return true;
         }
         // TODO: add decimal promotion support
-        if (!(leftType instanceof DecimalType) && !(rightType instanceof DecimalType) && !leftType.equals(rightType)) {
+        if (!(leftType instanceof DecimalV2Type)
+                && !(rightType instanceof DecimalV2Type)
+                && !leftType.equals(rightType)) {
             return true;
         }
         return false;
@@ -167,7 +188,8 @@ public class TypeCoercionUtils {
      * find the tightest common type for two type
      */
     @Developing
-    public static Optional<DataType> findTightestCommonType(DataType left, DataType right) {
+    public static Optional<DataType> findTightestCommonType(BinaryOperator binaryOperator,
+            DataType left, DataType right) {
         // TODO: compatible with origin planner and BE
         // TODO: when add new type, add it to here
         DataType tightestCommonType = null;
@@ -177,28 +199,85 @@ public class TypeCoercionUtils {
             tightestCommonType = right;
         } else if (right instanceof NullType) {
             tightestCommonType = left;
-        } else if (left instanceof IntegralType && right instanceof DecimalType
-                && ((DecimalType) right).isWiderThan(left)) {
+        } else if (left instanceof IntegralType && right instanceof DecimalV2Type
+                && ((DecimalV2Type) right).isWiderThan(left)) {
             tightestCommonType = right;
-        } else if (right instanceof IntegralType && left instanceof DecimalType
-                && ((DecimalType) left).isWiderThan(right)) {
+        } else if (right instanceof IntegralType && left instanceof DecimalV2Type
+                && ((DecimalV2Type) left).isWiderThan(right)) {
             tightestCommonType = left;
         } else if (left instanceof NumericType && right instanceof NumericType
-                && !(left instanceof DecimalType) && !(right instanceof DecimalType)) {
+                && !(left instanceof DecimalV2Type) && !(right instanceof DecimalV2Type)) {
             for (DataType dataType : NUMERIC_PRECEDENCE) {
                 if (dataType.equals(left) || dataType.equals(right)) {
                     tightestCommonType = dataType;
                     break;
                 }
             }
+        } else if (left instanceof CharacterType && right instanceof CharacterType) {
+            tightestCommonType = CharacterType.widerCharacterType((CharacterType) left, (CharacterType) right);
         } else if (left instanceof CharacterType || right instanceof CharacterType) {
             tightestCommonType = StringType.INSTANCE;
-        } else if (left instanceof DecimalType && right instanceof IntegralType) {
-            tightestCommonType = DecimalType.widerDecimalType((DecimalType) left, DecimalType.forType(right));
-        } else if (left instanceof IntegralType && right instanceof DecimalType) {
-            tightestCommonType = DecimalType.widerDecimalType((DecimalType) right, DecimalType.forType(left));
+        } else if (left instanceof DecimalV2Type && right instanceof IntegralType) {
+            tightestCommonType = DecimalV2Type.widerDecimalV2Type((DecimalV2Type) left, DecimalV2Type.forType(right));
+        } else if (left instanceof IntegralType && right instanceof DecimalV2Type) {
+            tightestCommonType = DecimalV2Type.widerDecimalV2Type((DecimalV2Type) right, DecimalV2Type.forType(left));
+        } else if (left instanceof DateLikeType && right instanceof DateLikeType) {
+            if (left instanceof DateTimeV2Type && right instanceof DateTimeV2Type) {
+                if (((DateTimeV2Type) left).getScale() > ((DateTimeV2Type) right).getScale()) {
+                    tightestCommonType = left;
+                } else {
+                    tightestCommonType = right;
+                }
+            } else if (left instanceof DateTimeV2Type) {
+                tightestCommonType = left;
+            } else if (right instanceof DateTimeV2Type) {
+                tightestCommonType = right;
+            } else if (left instanceof DateTimeType || right instanceof DateTimeType) {
+                tightestCommonType = DateTimeType.INSTANCE;
+            } else if (left instanceof DateV2Type || right instanceof DateV2Type) {
+                tightestCommonType = DateV2Type.INSTANCE;
+            }
+        } else if (canCompareDate(left, right)) {
+            if (binaryOperator instanceof BinaryArithmetic) {
+                tightestCommonType = IntegerType.INSTANCE;
+            } else {
+                tightestCommonType = DateTimeType.INSTANCE;
+            }
         }
-        return Optional.ofNullable(tightestCommonType);
+        return tightestCommonType == null ? Optional.of(DoubleType.INSTANCE) : Optional.of(tightestCommonType);
+    }
+
+    /**
+     * The type used for arithmetic operations.
+     */
+    public static DataType getNumResultType(DataType type) {
+        if (type.isTinyIntType() || type.isSmallIntType() || type.isIntegerType() || type.isBigIntType()) {
+            return BigIntType.INSTANCE;
+        } else if (type.isLargeIntType()) {
+            return LargeIntType.INSTANCE;
+        } else if (type.isFloatType() || type.isDoubleType() || type.isStringLikeType()) {
+            return DoubleType.INSTANCE;
+        } else if (type.isDecimalV2Type()) {
+            return DecimalV2Type.SYSTEM_DEFAULT;
+        } else if (type.isNullType()) {
+            return NullType.INSTANCE;
+        }
+        throw new AnalysisException("no found appropriate data type.");
+    }
+
+    /**
+     * The common type used by arithmetic operations.
+     */
+    public static DataType findCommonNumericsType(DataType t1, DataType t2) {
+        if (t1.isDoubleType() || t2.isDoubleType()) {
+            return DoubleType.INSTANCE;
+        } else if (t1.isDecimalV2Type() || t2.isDecimalV2Type()) {
+            return DecimalV2Type.SYSTEM_DEFAULT;
+        } else if (t1.isLargeIntType() || t2.isLargeIntType()) {
+            return LargeIntType.INSTANCE;
+        } else {
+            return BigIntType.INSTANCE;
+        }
     }
 
     /**
@@ -229,7 +308,7 @@ public class TypeCoercionUtils {
         // TODO: need to rethink how to handle char and varchar to return char or varchar as much as possible.
         return Stream
                 .<Supplier<Optional<DataType>>>of(
-                        () -> findTightestCommonType(left, right),
+                        () -> findTightestCommonType(null, left, right),
                         () -> findWiderTypeForDecimal(left, right),
                         () -> characterPromotion(left, right),
                         () -> findTypeForComplex(left, right))
@@ -245,14 +324,14 @@ public class TypeCoercionUtils {
     @Developing
     public static Optional<DataType> findWiderTypeForDecimal(DataType left, DataType right) {
         DataType commonType = null;
-        if (left instanceof DecimalType && right instanceof DecimalType) {
-            commonType = DecimalType.widerDecimalType((DecimalType) left, (DecimalType) right);
-        } else if (left instanceof IntegralType && right instanceof DecimalType) {
-            commonType = DecimalType.widerDecimalType(DecimalType.forType(left), (DecimalType) right);
-        } else if (left instanceof DecimalType && right instanceof IntegralType) {
-            commonType = DecimalType.widerDecimalType((DecimalType) left, DecimalType.forType(right));
-        } else if ((left instanceof FractionalType && right instanceof DecimalType)
-                || (left instanceof DecimalType && right instanceof FractionalType)) {
+        if (left instanceof DecimalV2Type && right instanceof DecimalV2Type) {
+            commonType = DecimalV2Type.widerDecimalV2Type((DecimalV2Type) left, (DecimalV2Type) right);
+        } else if (left instanceof IntegralType && right instanceof DecimalV2Type) {
+            commonType = DecimalV2Type.widerDecimalV2Type(DecimalV2Type.forType(left), (DecimalV2Type) right);
+        } else if (left instanceof DecimalV2Type && right instanceof IntegralType) {
+            commonType = DecimalV2Type.widerDecimalV2Type((DecimalV2Type) left, DecimalV2Type.forType(right));
+        } else if ((left instanceof FractionalType && right instanceof DecimalV2Type)
+                || (left instanceof DecimalV2Type && right instanceof FractionalType)) {
             commonType = DoubleType.INSTANCE;
         }
         return Optional.ofNullable(commonType);
@@ -289,7 +368,36 @@ public class TypeCoercionUtils {
         if (input.getDataType().equals(dataType)) {
             return input;
         } else {
+            if (input instanceof Literal) {
+                DataType type = input.getDataType();
+                while (!type.equals(dataType)) {
+                    DataType promoted = type.promotion();
+                    if (type.equals(promoted)) {
+                        break;
+                    }
+                    type = promoted;
+                }
+                if (type.equals(dataType)) {
+                    Literal promoted = DataType.promoteNumberLiteral(((Literal) input).getValue(), dataType);
+                    if (promoted != null) {
+                        return promoted;
+                    }
+                }
+            }
             return new Cast(input, dataType);
         }
+    }
+
+    private static boolean canCompareDate(DataType left, DataType right) {
+        if (left instanceof DateLikeType) {
+            return right.isDateType() || right.isStringLikeType() || right instanceof TinyIntType
+                    || right instanceof SmallIntType || right instanceof IntegerType
+                    || right instanceof BigIntType;
+        } else if (right instanceof DateLikeType) {
+            return left.isStringLikeType() || left instanceof TinyIntType
+                    || left instanceof SmallIntType || left instanceof IntegerType
+                    || left instanceof BigIntType;
+        }
+        return false;
     }
 }

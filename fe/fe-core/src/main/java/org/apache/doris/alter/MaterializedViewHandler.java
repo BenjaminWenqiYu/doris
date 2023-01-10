@@ -233,6 +233,7 @@ public class MaterializedViewHandler extends AlterHandler {
      */
     public void processBatchAddRollup(List<AlterClause> alterClauses, Database db, OlapTable olapTable)
             throws DdlException, AnalysisException {
+        checkReplicaCount(olapTable);
         Map<String, RollupJobV2> rollupNameJobMap = new LinkedHashMap<>();
         // save job id for log
         Set<Long> logJobIdSet = new HashSet<>();
@@ -459,14 +460,20 @@ public class MaterializedViewHandler extends AlterHandler {
                         + " or unique table must has grouping columns");
             }
             for (MVColumnItem mvColumnItem : mvColumnItemList) {
-                String mvColumnName = mvColumnItem.getName();
+                if (mvColumnItem.getBaseColumnNames().size() != 1) {
+                    throw new DdlException(
+                            "mvColumnItem.getBaseColumnNames().size() != 1, mvColumnItem.getBaseColumnNames().size() = "
+                                    + mvColumnItem.getBaseColumnNames().size());
+                }
+
+                String mvColumnName = mvColumnItem.getBaseColumnNames().iterator().next();
                 Column baseColumn = olapTable.getColumn(mvColumnName);
                 if (mvColumnItem.isKey()) {
                     ++numOfKeys;
                 }
                 if (baseColumn == null) {
                     throw new DdlException("The mv column of agg or uniq table cannot be transformed "
-                            + "from original column[" + mvColumnItem.getBaseColumnName() + "]");
+                            + "from original column[" + String.join(",", mvColumnItem.getBaseColumnNames()) + "]");
                 }
                 Preconditions.checkNotNull(baseColumn, "Column[" + mvColumnName + "] does not exist");
                 AggregateType baseAggregationType = baseColumn.getAggregationType();
@@ -490,12 +497,20 @@ public class MaterializedViewHandler extends AlterHandler {
         } else {
             Set<String> partitionOrDistributedColumnName = olapTable.getPartitionColumnNames();
             partitionOrDistributedColumnName.addAll(olapTable.getDistributionColumnNames());
+
             for (MVColumnItem mvColumnItem : mvColumnItemList) {
-                if (partitionOrDistributedColumnName.contains(mvColumnItem.getBaseColumnName().toLowerCase())
-                        && mvColumnItem.getAggregationType() != null) {
-                    throw new DdlException("The partition and distributed columns " + mvColumnItem.getBaseColumnName()
-                            + " must be key column in mv");
+                Set<String> names = mvColumnItem.getBaseColumnNames();
+                if (names == null) {
+                    throw new DdlException("Base columns is null");
                 }
+                for (String str : names) {
+                    if (partitionOrDistributedColumnName.contains(str)
+                            && mvColumnItem.getAggregationType() != null) {
+                        throw new DdlException("The partition and distributed columns " + str
+                                + " must be key column in mv");
+                    }
+                }
+
                 newMVColumns.add(mvColumnItem.toMVColumn(olapTable));
             }
         }
@@ -519,7 +534,7 @@ public class MaterializedViewHandler extends AlterHandler {
                 nextColUniqueId++;
             }
         } else {
-            newMVColumns.stream().forEach(column -> {
+            newMVColumns.forEach(column -> {
                 column.setUniqueId(Column.COLUMN_UNIQUE_ID_INIT_VALUE);
             });
         }
@@ -721,7 +736,7 @@ public class MaterializedViewHandler extends AlterHandler {
                 nextColUniqueId++;
             }
         } else {
-            rollupSchema.stream().forEach(column -> {
+            rollupSchema.forEach(column -> {
                 column.setUniqueId(Column.COLUMN_UNIQUE_ID_INIT_VALUE);
             });
         }
@@ -808,7 +823,7 @@ public class MaterializedViewHandler extends AlterHandler {
             long mvIndexId = dropMaterializedView(mvName, olapTable);
             // Step3: log drop mv operation
             EditLog editLog = Env.getCurrentEnv().getEditLog();
-            editLog.logDropRollup(new DropInfo(db.getId(), olapTable.getId(), mvIndexId, false));
+            editLog.logDropRollup(new DropInfo(db.getId(), olapTable.getId(), mvIndexId, false, 0));
             LOG.info("finished drop materialized view [{}] in table [{}]", mvName, olapTable.getName());
         } catch (MetaNotFoundException e) {
             if (dropMaterializedViewStmt.isIfExists()) {
@@ -1034,7 +1049,7 @@ public class MaterializedViewHandler extends AlterHandler {
             LOG.info("set table's state to NORMAL, table id: {}, job id: {}", alterJob.getTableId(),
                     alterJob.getJobId());
         } else {
-            LOG.info("not set table's state, table id: {}, is job done: {}, job id: {}", alterJob.getTableId(),
+            LOG.debug("not set table's state, table id: {}, is job done: {}, job id: {}", alterJob.getTableId(),
                     alterJob.isDone(), alterJob.getJobId());
         }
     }

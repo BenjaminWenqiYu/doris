@@ -78,7 +78,7 @@ private:
 //   };
 //
 // You should always make your destructor private, to avoid any code deleting
-// the object accidently while there are references to it.
+// the object accidentally while there are references to it.
 template <class T>
 class RefCounted : public subtle::RefCountedBase {
 public:
@@ -94,9 +94,6 @@ public:
 
 protected:
     ~RefCounted() {}
-
-private:
-    DISALLOW_COPY_AND_ASSIGN(RefCounted<T>);
 };
 
 // Forward declaration.

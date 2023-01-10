@@ -35,6 +35,9 @@
 #include "util/file_utils.h"
 
 namespace doris {
+
+using FileSystemSPtr = std::shared_ptr<io::FileSystem>;
+
 namespace segment_v2 {
 using roaring::Roaring;
 
@@ -56,7 +59,7 @@ public:
 };
 
 template <FieldType type>
-void write_index_file(const std::string& filename, io::FileSystem* fs, const void* values,
+void write_index_file(const std::string& filename, FileSystemSPtr fs, const void* values,
                       size_t value_count, size_t null_count, ColumnIndexMetaPB* meta) {
     const auto* type_info = get_scalar_type_info<type>();
     {
@@ -77,7 +80,8 @@ template <FieldType type>
 void get_bitmap_reader_iter(const std::string& file_name, const ColumnIndexMetaPB& meta,
                             BitmapIndexReader** reader, BitmapIndexIterator** iter) {
     io::FileReaderSPtr file_reader;
-    ASSERT_EQ(io::global_local_filesystem()->open_file(file_name, &file_reader), Status::OK());
+    ASSERT_EQ(io::global_local_filesystem()->open_file(file_name, &file_reader, nullptr),
+              Status::OK());
     *reader = new BitmapIndexReader(std::move(file_reader), &meta.bitmap_index());
     auto st = (*reader)->load(true, false);
     EXPECT_TRUE(st.ok());

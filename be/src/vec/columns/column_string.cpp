@@ -56,7 +56,7 @@ MutableColumnPtr ColumnString::clone_resized(size_t to_size) const {
     return res;
 }
 
-MutableColumnPtr ColumnString::get_shinked_column() {
+MutableColumnPtr ColumnString::get_shrinked_column() {
     auto shrinked_column = ColumnString::create();
     shrinked_column->get_offsets().reserve(offsets.size());
     shrinked_column->get_chars().reserve(chars.size());
@@ -83,6 +83,7 @@ void ColumnString::insert_range_from(const IColumn& src, size_t start, size_t le
     size_t nested_length = src_concrete.offsets[start + length - 1] - nested_offset;
 
     size_t old_chars_size = chars.size();
+    check_chars_length(old_chars_size + nested_length);
     chars.resize(old_chars_size + nested_length);
     memcpy(&chars[old_chars_size], &src_concrete.chars[nested_offset], nested_length);
 
@@ -218,6 +219,7 @@ const char* ColumnString::deserialize_and_insert_from_arena(const char* pos) {
 
     const size_t old_size = chars.size();
     const size_t new_size = old_size + string_size;
+    check_chars_length(new_size);
     chars.resize(new_size);
     memcpy(chars.data() + old_size, pos, string_size);
 
@@ -300,6 +302,7 @@ ColumnPtr ColumnString::index_impl(const PaddedPODArray<Type>& indexes, size_t l
     for (size_t i = 0; i < limit; ++i) {
         new_chars_size += size_at(indexes[i]);
     }
+    check_chars_length(new_chars_size);
     res_chars.resize(new_chars_size);
 
     res_offsets.resize(limit);
@@ -399,11 +402,13 @@ ColumnPtr ColumnString::replicate(const Offsets& replicate_offsets) const {
         prev_string_offset = offsets[i];
     }
 
+    check_chars_length(res_chars.size());
     return res;
 }
 
-void ColumnString::replicate(const uint32_t* counts, size_t target_size, IColumn& column) const {
-    size_t col_size = size();
+void ColumnString::replicate(const uint32_t* counts, size_t target_size, IColumn& column,
+                             size_t begin, int count_sz) const {
+    size_t col_size = count_sz < 0 ? size() : count_sz;
     if (0 == col_size) {
         return;
     }
@@ -415,10 +420,12 @@ void ColumnString::replicate(const uint32_t* counts, size_t target_size, IColumn
     res_chars.reserve(chars.size() / col_size * target_size);
     res_offsets.reserve(target_size);
 
-    Offset prev_string_offset = 0;
+    size_t base = begin > 0 ? offsets[begin - 1] : 0;
+    Offset prev_string_offset = 0 + base;
     Offset current_new_offset = 0;
 
-    for (size_t i = 0; i < col_size; ++i) {
+    size_t end = begin + col_size;
+    for (size_t i = begin; i < end; ++i) {
         size_t size_to_replicate = counts[i];
         size_t string_size = offsets[i] - prev_string_offset;
 
@@ -433,6 +440,8 @@ void ColumnString::replicate(const uint32_t* counts, size_t target_size, IColumn
 
         prev_string_offset = offsets[i];
     }
+
+    check_chars_length(res_chars.size());
 }
 
 void ColumnString::reserve(size_t n) {
@@ -485,6 +494,30 @@ void ColumnString::sort_column(const ColumnSorter* sorter, EqualFlags& flags,
 void ColumnString::protect() {
     get_chars().protect();
     get_offsets().protect();
+}
+
+void ColumnString::compare_internal(size_t rhs_row_id, const IColumn& rhs, int nan_direction_hint,
+                                    int direction, std::vector<uint8>& cmp_res,
+                                    uint8* __restrict filter) const {
+    auto sz = this->size();
+    DCHECK(cmp_res.size() == sz);
+    const auto& cmp_base = assert_cast<const ColumnString&>(rhs).get_data_at(rhs_row_id);
+    size_t begin = simd::find_zero(cmp_res, 0);
+    while (begin < sz) {
+        size_t end = simd::find_one(cmp_res, begin + 1);
+        for (size_t row_id = begin; row_id < end; row_id++) {
+            auto value_a = get_data_at(row_id);
+            int res = memcmp_small_allow_overflow15(value_a.data, value_a.size, cmp_base.data,
+                                                    cmp_base.size);
+            if (res * direction < 0) {
+                filter[row_id] = 1;
+                cmp_res[row_id] = 1;
+            } else if (res * direction > 0) {
+                cmp_res[row_id] = 1;
+            }
+        }
+        begin = simd::find_zero(cmp_res, end + 1);
+    }
 }
 
 } // namespace doris::vectorized

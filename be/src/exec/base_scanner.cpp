@@ -101,7 +101,10 @@ Status BaseScanner::init_expr_ctxes() {
     }
 
     std::map<SlotId, SlotDescriptor*> src_slot_desc_map;
-    for (auto slot_desc : src_tuple_desc->slots()) {
+    std::unordered_map<SlotDescriptor*, int> src_slot_desc_to_index {};
+    for (int i = 0, len = src_tuple_desc->slots().size(); i < len; ++i) {
+        auto* slot_desc = src_tuple_desc->slots()[i];
+        src_slot_desc_to_index.emplace(slot_desc, i);
         src_slot_desc_map.emplace(slot_desc->id(), slot_desc);
     }
     for (auto slot_id : _params.src_slot_ids) {
@@ -121,20 +124,13 @@ Status BaseScanner::init_expr_ctxes() {
 
     // preceding filter expr should be initialized by using `_row_desc`, which is the source row descriptor
     if (!_pre_filter_texprs.empty()) {
-        if (_state->enable_vectorized_exec()) {
-            // for vectorized, preceding filter exprs should be compounded to one passed from fe.
-            DCHECK(_pre_filter_texprs.size() == 1);
-            _vpre_filter_ctx_ptr.reset(new doris::vectorized::VExprContext*);
-            RETURN_IF_ERROR(vectorized::VExpr::create_expr_tree(
-                    _state->obj_pool(), _pre_filter_texprs[0], _vpre_filter_ctx_ptr.get()));
-            RETURN_IF_ERROR((*_vpre_filter_ctx_ptr)->prepare(_state, *_row_desc));
-            RETURN_IF_ERROR((*_vpre_filter_ctx_ptr)->open(_state));
-        } else {
-            RETURN_IF_ERROR(Expr::create_expr_trees(_state->obj_pool(), _pre_filter_texprs,
-                                                    &_pre_filter_ctxs));
-            RETURN_IF_ERROR(Expr::prepare(_pre_filter_ctxs, _state, *_row_desc));
-            RETURN_IF_ERROR(Expr::open(_pre_filter_ctxs, _state));
-        }
+        // for vectorized, preceding filter exprs should be compounded to one passed from fe.
+        DCHECK(_pre_filter_texprs.size() == 1);
+        _vpre_filter_ctx_ptr.reset(new doris::vectorized::VExprContext*);
+        RETURN_IF_ERROR(vectorized::VExpr::create_expr_tree(
+                _state->obj_pool(), _pre_filter_texprs[0], _vpre_filter_ctx_ptr.get()));
+        RETURN_IF_ERROR((*_vpre_filter_ctx_ptr)->prepare(_state, *_row_desc));
+        RETURN_IF_ERROR((*_vpre_filter_ctx_ptr)->open(_state));
     }
 
     // Construct dest slots information
@@ -155,20 +151,11 @@ Status BaseScanner::init_expr_ctxes() {
                                          slot_desc->col_name());
         }
 
-        if (_state->enable_vectorized_exec()) {
-            vectorized::VExprContext* ctx = nullptr;
-            RETURN_IF_ERROR(
-                    vectorized::VExpr::create_expr_tree(_state->obj_pool(), it->second, &ctx));
-            RETURN_IF_ERROR(ctx->prepare(_state, *_row_desc.get()));
-            RETURN_IF_ERROR(ctx->open(_state));
-            _dest_vexpr_ctx.emplace_back(ctx);
-        } else {
-            ExprContext* ctx = nullptr;
-            RETURN_IF_ERROR(Expr::create_expr_tree(_state->obj_pool(), it->second, &ctx));
-            RETURN_IF_ERROR(ctx->prepare(_state, *_row_desc.get()));
-            RETURN_IF_ERROR(ctx->open(_state));
-            _dest_expr_ctx.emplace_back(ctx);
-        }
+        vectorized::VExprContext* ctx = nullptr;
+        RETURN_IF_ERROR(vectorized::VExpr::create_expr_tree(_state->obj_pool(), it->second, &ctx));
+        RETURN_IF_ERROR(ctx->prepare(_state, *_row_desc.get()));
+        RETURN_IF_ERROR(ctx->open(_state));
+        _dest_vexpr_ctx.emplace_back(ctx);
         if (has_slot_id_map) {
             auto it1 = _params.dest_sid_to_src_sid_without_trans.find(slot_desc->id());
             if (it1 == std::end(_params.dest_sid_to_src_sid_without_trans)) {
@@ -178,6 +165,8 @@ Status BaseScanner::init_expr_ctxes() {
                 if (_src_slot_it == std::end(src_slot_desc_map)) {
                     return Status::InternalError("No src slot {} in src slot descs", it1->second);
                 }
+                _dest_slot_to_src_slot_index.emplace(_src_slot_descs_order_by_dest.size(),
+                                                     src_slot_desc_to_index[_src_slot_it->second]);
                 _src_slot_descs_order_by_dest.emplace_back(_src_slot_it->second);
             }
         }
@@ -332,7 +321,8 @@ Status BaseScanner::_materialize_dest_block(vectorized::Block* dest_block) {
             for (int i = 0; i < rows; ++i) {
                 if (filter_map[i] && nullable_column->is_null_at(i)) {
                     if (_strict_mode && (_src_slot_descs_order_by_dest[dest_index]) &&
-                        !_src_block.get_by_position(dest_index).column->is_null_at(i)) {
+                        !_src_block.get_by_position(_dest_slot_to_src_slot_index[dest_index])
+                                 .column->is_null_at(i)) {
                         RETURN_IF_ERROR(_state->append_error_msg_to_file(
                                 [&]() -> std::string {
                                     return _src_block.dump_one_line(i, _num_of_columns_from_file);
@@ -479,6 +469,40 @@ void BaseScanner::_fill_columns_from_path() {
                                                                 slot_desc->col_name()));
         }
     }
+}
+
+bool BaseScanner::is_null(const Slice& slice) {
+    return slice.size == 2 && slice.data[0] == '\\' && slice.data[1] == 'N';
+}
+
+bool BaseScanner::is_array(const Slice& slice) {
+    return slice.size > 1 && slice.data[0] == '[' && slice.data[slice.size - 1] == ']';
+}
+
+bool BaseScanner::check_array_format(std::vector<Slice>& split_values) {
+    // if not the array format, filter this line and return error url
+    auto dest_slot_descs = _dest_tuple_desc->slots();
+    for (int j = 0; j < split_values.size() && j < dest_slot_descs.size(); ++j) {
+        auto dest_slot_desc = dest_slot_descs[j];
+        if (!dest_slot_desc->is_materialized()) {
+            continue;
+        }
+        const Slice& value = split_values[j];
+        if (dest_slot_desc->type().is_array_type() && !is_null(value) && !is_array(value)) {
+            RETURN_IF_ERROR(_state->append_error_msg_to_file(
+                    [&]() -> std::string { return std::string(value.data, value.size); },
+                    [&]() -> std::string {
+                        fmt::memory_buffer err_msg;
+                        fmt::format_to(err_msg, "Invalid format for array column({})",
+                                       dest_slot_desc->col_name());
+                        return fmt::to_string(err_msg);
+                    },
+                    &_scanner_eof));
+            _counter->num_rows_filtered++;
+            return false;
+        }
+    }
+    return true;
 }
 
 } // namespace doris

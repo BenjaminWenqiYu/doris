@@ -39,14 +39,15 @@ import org.apache.doris.analysis.AlterResourceStmt;
 import org.apache.doris.analysis.AlterRoutineLoadStmt;
 import org.apache.doris.analysis.AlterSqlBlockRuleStmt;
 import org.apache.doris.analysis.AlterSystemStmt;
-import org.apache.doris.analysis.AlterTableStatsStmt;
 import org.apache.doris.analysis.AlterTableStmt;
+import org.apache.doris.analysis.AlterUserStmt;
 import org.apache.doris.analysis.AlterViewStmt;
 import org.apache.doris.analysis.AnalyzeStmt;
 import org.apache.doris.analysis.BackupStmt;
 import org.apache.doris.analysis.CancelAlterSystemStmt;
 import org.apache.doris.analysis.CancelAlterTableStmt;
 import org.apache.doris.analysis.CancelBackupStmt;
+import org.apache.doris.analysis.CancelExportStmt;
 import org.apache.doris.analysis.CancelLoadStmt;
 import org.apache.doris.analysis.CleanLabelStmt;
 import org.apache.doris.analysis.CreateCatalogStmt;
@@ -83,6 +84,7 @@ import org.apache.doris.analysis.DropRepositoryStmt;
 import org.apache.doris.analysis.DropResourceStmt;
 import org.apache.doris.analysis.DropRoleStmt;
 import org.apache.doris.analysis.DropSqlBlockRuleStmt;
+import org.apache.doris.analysis.DropTableStatsStmt;
 import org.apache.doris.analysis.DropTableStmt;
 import org.apache.doris.analysis.DropUserStmt;
 import org.apache.doris.analysis.GrantStmt;
@@ -116,6 +118,7 @@ import org.apache.doris.common.Config;
 import org.apache.doris.common.DdlException;
 import org.apache.doris.load.EtlJobType;
 import org.apache.doris.load.sync.SyncJobManager;
+import org.apache.doris.statistics.StatisticsRepository;
 
 /**
  * Use for execute ddl.
@@ -162,10 +165,8 @@ public class DdlExecutor {
             env.createMaterializedView((CreateMaterializedViewStmt) ddlStmt);
         } else if (ddlStmt instanceof AlterTableStmt) {
             env.alterTable((AlterTableStmt) ddlStmt);
-        } else if (ddlStmt instanceof AlterTableStatsStmt) {
-            env.getStatisticsManager().alterTableStatistics((AlterTableStatsStmt) ddlStmt);
         } else if (ddlStmt instanceof AlterColumnStatsStmt) {
-            env.getStatisticsManager().alterColumnStatistics((AlterColumnStatsStmt) ddlStmt);
+            StatisticsRepository.alterColumnStatistics((AlterColumnStatsStmt) ddlStmt);
         } else if (ddlStmt instanceof AlterViewStmt) {
             env.alterView((AlterViewStmt) ddlStmt);
         } else if (ddlStmt instanceof CancelAlterTableStmt) {
@@ -185,6 +186,8 @@ public class DdlExecutor {
             } else {
                 env.getLoadManager().createLoadJobFromStmt(loadStmt);
             }
+        } else if (ddlStmt instanceof CancelExportStmt) {
+            env.getExportMgr().cancelExportJob((CancelExportStmt) ddlStmt);
         } else if (ddlStmt instanceof CancelLoadStmt) {
             env.getLoadManager().cancelLoadJob((CancelLoadStmt) ddlStmt);
         } else if (ddlStmt instanceof CreateRoutineLoadStmt) {
@@ -309,7 +312,7 @@ public class DdlExecutor {
         } else if (ddlStmt instanceof RefreshDbStmt) {
             env.getRefreshManager().handleRefreshDb((RefreshDbStmt) ddlStmt);
         } else if (ddlStmt instanceof AnalyzeStmt) {
-            env.getStatisticsJobManager().createStatisticsJob((AnalyzeStmt) ddlStmt);
+            env.createAnalysisJob((AnalyzeStmt) ddlStmt);
         } else if (ddlStmt instanceof AlterResourceStmt) {
             env.getResourceMgr().alterResource((AlterResourceStmt) ddlStmt);
         } else if (ddlStmt instanceof CreatePolicyStmt) {
@@ -336,6 +339,10 @@ public class DdlExecutor {
             env.refreshMaterializedView((RefreshMaterializedViewStmt) ddlStmt);
         } else if (ddlStmt instanceof RefreshCatalogStmt) {
             env.getCatalogMgr().refreshCatalog((RefreshCatalogStmt) ddlStmt);
+        } else if (ddlStmt instanceof AlterUserStmt) {
+            env.getAuth().alterUser((AlterUserStmt) ddlStmt);
+        } else if (ddlStmt instanceof DropTableStatsStmt) {
+            // TODO: support later
         } else {
             throw new DdlException("Unknown statement.");
         }

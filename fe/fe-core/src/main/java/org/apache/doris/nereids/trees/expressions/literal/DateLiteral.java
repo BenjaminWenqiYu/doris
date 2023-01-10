@@ -18,15 +18,14 @@
 package org.apache.doris.nereids.trees.expressions.literal;
 
 import org.apache.doris.analysis.LiteralExpr;
+import org.apache.doris.catalog.Type;
 import org.apache.doris.nereids.exceptions.AnalysisException;
-import org.apache.doris.nereids.trees.expressions.Expression;
 import org.apache.doris.nereids.trees.expressions.visitor.ExpressionVisitor;
 import org.apache.doris.nereids.types.DataType;
-import org.apache.doris.nereids.types.DateTimeType;
 import org.apache.doris.nereids.types.DateType;
+import org.apache.doris.nereids.types.coercion.DateLikeType;
 import org.apache.doris.nereids.util.DateUtils;
 
-import com.google.common.base.Preconditions;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.joda.time.LocalDateTime;
@@ -37,13 +36,12 @@ import org.joda.time.format.DateTimeFormatter;
  */
 public class DateLiteral extends Literal {
 
+    protected static DateTimeFormatter DATE_FORMATTER = null;
+    protected static DateTimeFormatter DATE_FORMATTER_TWO_DIGIT = null;
+    protected static DateTimeFormatter DATEKEY_FORMATTER = null;
+
     private static final Logger LOG = LogManager.getLogger(DateLiteral.class);
-
     private static final int DATEKEY_LENGTH = 8;
-
-    private static DateTimeFormatter DATE_FORMATTER = null;
-    private static DateTimeFormatter DATE_FORMATTER_TWO_DIGIT = null;
-    private static DateTimeFormatter DATEKEY_FORMATTER = null;
 
     protected long year;
     protected long month;
@@ -61,7 +59,11 @@ public class DateLiteral extends Literal {
     }
 
     public DateLiteral(String s) throws AnalysisException {
-        super(DateType.INSTANCE);
+        this(DateType.INSTANCE, s);
+    }
+
+    protected DateLiteral(DateLikeType dataType, String s) throws AnalysisException {
+        super(dataType);
         init(s);
     }
 
@@ -73,7 +75,14 @@ public class DateLiteral extends Literal {
      * C'tor for date type.
      */
     public DateLiteral(long year, long month, long day) {
-        super(DateType.INSTANCE);
+        this(DateType.INSTANCE, year, month, day);
+    }
+
+    /**
+     * C'tor for date type.
+     */
+    public DateLiteral(DateLikeType dataType, long year, long month, long day) {
+        super(dataType);
         this.year = year;
         this.month = month;
         this.day = day;
@@ -89,7 +98,7 @@ public class DateLiteral extends Literal {
         this.day = other.day;
     }
 
-    private void init(String s) throws AnalysisException {
+    protected void init(String s) throws AnalysisException {
         try {
             LocalDateTime dateTime;
             if (s.split("-")[0].length() == 2) {
@@ -108,44 +117,23 @@ public class DateLiteral extends Literal {
     }
 
     @Override
-    protected Expression uncheckedCastTo(DataType targetType) throws AnalysisException {
-        if (getDataType().equals(targetType)) {
-            return this;
-        }
-        if (targetType.isDate()) {
-            if (getDataType().equals(targetType)) {
-                return this;
-            }
-            if (targetType.equals(DateType.INSTANCE)) {
-                return new DateLiteral(this.year, this.month, this.day);
-            } else if (targetType.equals(DateTimeType.INSTANCE)) {
-                return new DateTimeLiteral(this.year, this.month, this.day, 0, 0, 0);
-            } else {
-                throw new AnalysisException("Error date literal type");
-            }
-        }
-        //todo other target type cast
-        return this;
-    }
-
-    public DateLiteral withDataType(DataType type) {
-        Preconditions.checkArgument(type.isDate() || type.isDateTime());
-        return new DateLiteral(this, type);
-    }
-
-    @Override
-    public <R, C> R accept(ExpressionVisitor<R, C> visitor, C context) {
-        return visitor.visitDateLiteral(this, context);
-    }
-
-    @Override
     public Long getValue() {
         return (year * 10000 + month * 100 + day) * 1000000L;
     }
 
     @Override
+    public String getStringValue() {
+        return String.format("%04d-%02d-%02d", year, month, day);
+    }
+
+    @Override
     public String toSql() {
         return toString();
+    }
+
+    @Override
+    public <R, C> R accept(ExpressionVisitor<R, C> visitor, C context) {
+        return visitor.visitDateLiteral(this, context);
     }
 
     @Override
@@ -155,7 +143,7 @@ public class DateLiteral extends Literal {
 
     @Override
     public LiteralExpr toLegacyLiteral() {
-        return new org.apache.doris.analysis.DateLiteral(year, month, day);
+        return new org.apache.doris.analysis.DateLiteral(year, month, day, Type.DATE);
     }
 
     public long getYear() {
@@ -168,6 +156,11 @@ public class DateLiteral extends Literal {
 
     public long getDay() {
         return day;
+    }
+
+    public DateLiteral plusDays(int days) {
+        LocalDateTime dateTime = LocalDateTime.parse(getStringValue(), DATE_FORMATTER).plusDays(days);
+        return new DateLiteral(dateTime.getYear(), dateTime.getMonthOfYear(), dateTime.getDayOfMonth());
     }
 }
 

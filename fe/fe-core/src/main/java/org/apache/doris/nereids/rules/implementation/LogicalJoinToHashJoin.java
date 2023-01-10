@@ -33,7 +33,8 @@ public class LogicalJoinToHashJoin extends OneImplementationRuleFactory {
                 .then(join -> new PhysicalHashJoin<>(
             join.getJoinType(),
             join.getHashJoinConjuncts(),
-            join.getOtherJoinCondition(),
+            join.getOtherJoinConjuncts(),
+            join.getHint(),
             join.getLogicalProperties(),
             join.left(),
             join.right())

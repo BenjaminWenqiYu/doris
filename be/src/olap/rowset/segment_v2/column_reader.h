@@ -28,12 +28,14 @@
 #include "io/fs/file_reader.h"
 #include "olap/block_column_predicate.h"
 #include "olap/column_predicate.h"
+#include "olap/iterators.h"
 #include "olap/rowset/segment_v2/bitmap_index_reader.h" // for BitmapIndexReader
 #include "olap/rowset/segment_v2/common.h"
-#include "olap/rowset/segment_v2/ordinal_page_index.h" // for OrdinalPageIndexIterator
-#include "olap/rowset/segment_v2/page_handle.h"        // for PageHandle
-#include "olap/rowset/segment_v2/parsed_page.h"        // for ParsedPage
-#include "olap/rowset/segment_v2/row_ranges.h"         // for RowRanges
+#include "olap/rowset/segment_v2/inverted_index_reader.h" // for InvertedIndexReader
+#include "olap/rowset/segment_v2/ordinal_page_index.h"    // for OrdinalPageIndexIterator
+#include "olap/rowset/segment_v2/page_handle.h"           // for PageHandle
+#include "olap/rowset/segment_v2/parsed_page.h"           // for ParsedPage
+#include "olap/rowset/segment_v2/row_ranges.h"            // for RowRanges
 #include "olap/rowset/segment_v2/zone_map_index.h"
 #include "olap/tablet_schema.h"
 #include "util/file_cache.h"
@@ -75,6 +77,7 @@ struct ColumnIteratorOptions {
     // page types are divided into DATA_PAGE & INDEX_PAGE
     // INDEX_PAGE including index_page, dict_page and short_key_page
     PageTypePB type;
+    IOContext io_ctx;
 
     void sanity_check() const {
         CHECK_NOTNULL(file_reader);
@@ -103,6 +106,9 @@ public:
     // Client should delete returned iterator
     Status new_bitmap_index_iterator(BitmapIndexIterator** iterator);
 
+    Status new_inverted_index_iterator(const TabletIndex* index_meta,
+                                       InvertedIndexIterator** iterator);
+
     // Seek to the first entry in the column.
     Status seek_to_first(OrdinalPageIndexIterator* iter);
     Status seek_at_or_before(ordinal_t ordinal, OrdinalPageIndexIterator* iter);
@@ -124,6 +130,8 @@ public:
     // Since segment zone map is stored in metadata, this function is fast without I/O.
     // Return true if segment zone map is absent or `cond' could be satisfied, false otherwise.
     bool match_condition(const AndBlockColumnPredicate* col_predicates) const;
+
+    Status next_batch_of_zone_map(size_t* n, vectorized::MutableColumnPtr& dst) const;
 
     // get row ranges with zone map
     // - cond_column is user's query predicate
@@ -150,6 +158,8 @@ public:
 
     DictEncodingType get_dict_encoding_type() { return _dict_encoding_type; }
 
+    void disable_index_meta_cache() { _index_meta_use_page_cache = false; }
+
 private:
     ColumnReader(const ColumnReaderOptions& opts, const ColumnMetaPB& meta, uint64_t num_rows,
                  io::FileReaderSPtr file_reader);
@@ -159,7 +169,7 @@ private:
     // May be called multiple times, subsequent calls will no op.
     Status _ensure_index_loaded() {
         return _load_index_once.call([this] {
-            bool use_page_cache = !config::disable_storage_page_cache;
+            bool use_page_cache = !config::disable_storage_page_cache && _index_meta_use_page_cache;
             RETURN_IF_ERROR(_load_zone_map_index(use_page_cache, _opts.kept_in_memory));
             RETURN_IF_ERROR(_load_ordinal_index(use_page_cache, _opts.kept_in_memory));
             RETURN_IF_ERROR(_load_bitmap_index(use_page_cache, _opts.kept_in_memory));
@@ -168,9 +178,18 @@ private:
         });
     }
 
+    // Read column inverted indexes into memory
+    // May be called multiple times, subsequent calls will no op.
+    Status _ensure_inverted_index_loaded(const TabletIndex* index_meta) {
+        // load inverted index only if not loaded or index_id is changed
+        RETURN_IF_ERROR(_load_inverted_index_index(index_meta));
+        return Status::OK();
+    }
+
     Status _load_zone_map_index(bool use_page_cache, bool kept_in_memory);
     Status _load_ordinal_index(bool use_page_cache, bool kept_in_memory);
     Status _load_bitmap_index(bool use_page_cache, bool kept_in_memory);
+    Status _load_inverted_index_index(const TabletIndex* index_meta);
     Status _load_bloom_filter_index(bool use_page_cache, bool kept_in_memory);
 
     bool _zone_map_match_condition(const ZoneMapPB& zone_map, WrapperField* min_value_container,
@@ -201,15 +220,18 @@ private:
             nullptr; // initialized in init(), used for create PageDecoder
 
     // meta for various column indexes (null if the index is absent)
+    bool _index_meta_use_page_cache = true;
     const ZoneMapIndexPB* _zone_map_index_meta = nullptr;
     const OrdinalIndexPB* _ordinal_index_meta = nullptr;
     const BitmapIndexPB* _bitmap_index_meta = nullptr;
     const BloomFilterIndexPB* _bf_index_meta = nullptr;
 
     DorisCallOnce<Status> _load_index_once;
+    mutable std::mutex _load_index_lock;
     std::unique_ptr<ZoneMapIndexReader> _zone_map_index;
     std::unique_ptr<OrdinalIndexReader> _ordinal_index;
     std::unique_ptr<BitmapIndexReader> _bitmap_index;
+    std::unique_ptr<InvertedIndexReader> _inverted_index;
     std::unique_ptr<BloomFilterIndexReader> _bloom_filter_index;
 
     std::vector<std::unique_ptr<ColumnReader>> _sub_readers;
@@ -256,6 +278,10 @@ public:
         return Status::NotSupported("next_batch not implement");
     }
 
+    virtual Status next_batch_of_zone_map(size_t* n, vectorized::MutableColumnPtr& dst) {
+        return Status::NotSupported("next_batch_of_zone_map not implement");
+    }
+
     virtual Status read_by_rowids(const rowid_t* rowids, const size_t count,
                                   vectorized::MutableColumnPtr& dst) {
         return Status::NotSupported("read_by_rowids not implement");
@@ -298,6 +324,8 @@ public:
     Status next_batch(size_t* n, ColumnBlockView* dst, bool* has_null) override;
 
     Status next_batch(size_t* n, vectorized::MutableColumnPtr& dst, bool* has_null) override;
+
+    Status next_batch_of_zone_map(size_t* n, vectorized::MutableColumnPtr& dst) override;
 
     Status read_by_rowids(const rowid_t* rowids, const size_t count,
                           vectorized::MutableColumnPtr& dst) override;
@@ -367,7 +395,7 @@ public:
 
 class ArrayFileColumnIterator final : public ColumnIterator {
 public:
-    explicit ArrayFileColumnIterator(ColumnReader* reader, FileColumnIterator* length_reader,
+    explicit ArrayFileColumnIterator(ColumnReader* reader, FileColumnIterator* offset_reader,
                                      ColumnIterator* item_iterator, ColumnIterator* null_iterator);
 
     ~ArrayFileColumnIterator() override = default;
@@ -446,6 +474,10 @@ public:
     Status next_batch(size_t* n, ColumnBlockView* dst, bool* has_null) override;
 
     Status next_batch(size_t* n, vectorized::MutableColumnPtr& dst, bool* has_null) override;
+
+    Status next_batch_of_zone_map(size_t* n, vectorized::MutableColumnPtr& dst) override {
+        return next_batch(n, dst);
+    }
 
     Status read_by_rowids(const rowid_t* rowids, const size_t count,
                           vectorized::MutableColumnPtr& dst) override;

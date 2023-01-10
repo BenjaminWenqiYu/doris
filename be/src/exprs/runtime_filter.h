@@ -17,15 +17,15 @@
 
 #pragma once
 
-#include <condition_variable>
-#include <list>
-#include <map>
-#include <mutex>
-
 #include "exprs/expr_context.h"
+#include "runtime/runtime_state.h"
 #include "util/runtime_profile.h"
 #include "util/time.h"
 #include "util/uid_util.h"
+
+namespace butil {
+class IOBufAsZeroCopyInputStream;
+}
 
 namespace doris {
 class Predicate;
@@ -43,10 +43,13 @@ class PInFilter;
 class PMinMaxFilter;
 class HashJoinNode;
 class RuntimeProfile;
+class BloomFilterFuncBase;
+class BitmapFilterFuncBase;
 
 namespace vectorized {
 class VExpr;
 class VExprContext;
+struct SharedRuntimeFilterContext;
 } // namespace vectorized
 
 enum class RuntimeFilterType {
@@ -54,7 +57,8 @@ enum class RuntimeFilterType {
     IN_FILTER = 0,
     MINMAX_FILTER = 1,
     BLOOM_FILTER = 2,
-    IN_OR_BLOOM_FILTER = 3
+    IN_OR_BLOOM_FILTER = 3,
+    BITMAP_FILTER = 4
 };
 
 inline std::string to_string(RuntimeFilterType type) {
@@ -71,6 +75,9 @@ inline std::string to_string(RuntimeFilterType type) {
     case RuntimeFilterType::IN_OR_BLOOM_FILTER: {
         return std::string("in_or_bloomfilter");
     }
+    case RuntimeFilterType::BITMAP_FILTER: {
+        return std::string("bitmapfilter");
+    }
     default:
         return std::string("UNKNOWN");
     }
@@ -84,7 +91,8 @@ struct RuntimeFilterParams {
               bloom_filter_size(-1),
               max_in_num(0),
               filter_id(0),
-              fragment_instance_id(0, 0) {}
+              fragment_instance_id(0, 0),
+              bitmap_filter_not_in(false) {}
 
     RuntimeFilterType filter_type;
     PrimitiveType column_return_type;
@@ -93,17 +101,30 @@ struct RuntimeFilterParams {
     int32_t max_in_num;
     int32_t filter_id;
     UniqueId fragment_instance_id;
+    bool bitmap_filter_not_in;
 };
 
 struct UpdateRuntimeFilterParams {
+    UpdateRuntimeFilterParams(const PPublishFilterRequest* req,
+                              butil::IOBufAsZeroCopyInputStream* data_stream, ObjectPool* obj_pool)
+            : request(req), data(data_stream), pool(obj_pool) {}
     const PPublishFilterRequest* request;
-    const char* data;
+    butil::IOBufAsZeroCopyInputStream* data;
     ObjectPool* pool;
 };
 
 struct MergeRuntimeFilterParams {
+    MergeRuntimeFilterParams(const PMergeFilterRequest* req,
+                             butil::IOBufAsZeroCopyInputStream* data_stream)
+            : request(req), data(data_stream) {}
     const PMergeFilterRequest* request;
-    const char* data;
+    butil::IOBufAsZeroCopyInputStream* data;
+};
+
+enum RuntimeFilterState {
+    READY,
+    NOT_READY,
+    TIME_OUT,
 };
 
 /// The runtimefilter is built in the join node.
@@ -121,7 +142,8 @@ public:
               _is_broadcast_join(true),
               _has_remote_target(false),
               _has_local_target(false),
-              _is_ready(false),
+              _rf_state(RuntimeFilterState::NOT_READY),
+              _rf_state_atomic(RuntimeFilterState::NOT_READY),
               _role(RuntimeFilterRole::PRODUCER),
               _expr_order(-1),
               _always_true(false),
@@ -135,10 +157,14 @@ public:
                          const TQueryOptions* query_options, const RuntimeFilterRole role,
                          int node_id, IRuntimeFilter** res);
 
+    void copy_to_shared_context(vectorized::SharedRuntimeFilterContext& context);
+    Status copy_from_shared_context(vectorized::SharedRuntimeFilterContext& context);
+
     // insert data to build filter
     // only used for producer
     void insert(const void* data);
     void insert(const StringRef& data);
+    void insert_batch(vectorized::ColumnPtr column, const std::vector<int>& rows);
 
     // publish filter
     // push filter to remote node or push down it to scan_node
@@ -170,12 +196,21 @@ public:
 
     bool has_remote_target() const { return _has_remote_target; }
 
-    bool is_ready() const { return _is_ready; }
+    bool is_ready() const {
+        return (!_state->enable_pipeline_exec() && _rf_state == RuntimeFilterState::READY) ||
+               (_state->enable_pipeline_exec() &&
+                _rf_state_atomic.load(std::memory_order_acquire) == RuntimeFilterState::READY);
+    }
+    RuntimeFilterState current_state() const {
+        return _state->enable_pipeline_exec() ? _rf_state_atomic.load(std::memory_order_acquire)
+                                              : _rf_state;
+    }
+    bool is_ready_or_timeout();
 
     bool is_producer() const { return _role == RuntimeFilterRole::PRODUCER; }
     bool is_consumer() const { return _role == RuntimeFilterRole::CONSUMER; }
     void set_role(const RuntimeFilterRole role) { _role = role; }
-    int expr_order() { return _expr_order; }
+    int expr_order() const { return _expr_order; }
 
     // only used for consumer
     // if filter is not ready for filter data scan_node
@@ -189,7 +224,9 @@ public:
 
     // init filter with desc
     Status init_with_desc(const TRuntimeFilterDesc* desc, const TQueryOptions* options,
-                          UniqueId fragment_id = UniqueId(0, 0), int node_id = -1);
+                          UniqueId fragment_id, int node_id = -1);
+
+    BloomFilterFuncBase* get_bloomfilter() const;
 
     // serialize _wrapper to protobuf
     Status serialize(PMergeFilterRequest* request, void** data, int* len);
@@ -199,9 +236,11 @@ public:
 
     // for ut
     const RuntimePredicateWrapper* get_wrapper();
-    static Status create_wrapper(const MergeRuntimeFilterParams* param, ObjectPool* pool,
+    static Status create_wrapper(RuntimeState* state, const MergeRuntimeFilterParams* param,
+                                 ObjectPool* pool,
                                  std::unique_ptr<RuntimePredicateWrapper>* wrapper);
-    static Status create_wrapper(const UpdateRuntimeFilterParams* param, ObjectPool* pool,
+    static Status create_wrapper(RuntimeState* state, const UpdateRuntimeFilterParams* param,
+                                 ObjectPool* pool,
                                  std::unique_ptr<RuntimePredicateWrapper>* wrapper);
     void change_to_bloom_filter();
     Status update_filter(const UpdateRuntimeFilterParams* param);
@@ -209,7 +248,7 @@ public:
     void set_ignored() { _is_ignored = true; }
 
     // for ut
-    bool is_ignored() { return _is_ignored; }
+    bool is_ignored() const { return _is_ignored; }
 
     void set_ignored_msg(std::string& msg) { _ignored_msg = msg; }
 
@@ -231,6 +270,14 @@ public:
 
     void ready_for_publish();
 
+    std::shared_ptr<BitmapFilterFuncBase> get_bitmap_filter() const;
+
+    static bool enable_use_batch(int be_exec_version, PrimitiveType type) {
+        return be_exec_version > 0 && (is_int_or_bool(type) || is_float_or_double(type));
+    }
+
+    int filter_id() const { return _filter_id; }
+
 protected:
     // serialize _wrapper to protobuf
     void to_protobuf(PInFilter* filter);
@@ -240,8 +287,33 @@ protected:
     Status serialize_impl(T* request, void** data, int* len);
 
     template <class T>
-    static Status _create_wrapper(const T* param, ObjectPool* pool,
+    static Status _create_wrapper(RuntimeState* state, const T* param, ObjectPool* pool,
                                   std::unique_ptr<RuntimePredicateWrapper>* wrapper);
+
+    void _set_push_down() { _is_push_down = true; }
+
+    std::string _format_status() {
+        return fmt::format(
+                "[IsPushDown = {}, RuntimeFilterState = {}, IsIgnored = {}, HasRemoteTarget = {}, "
+                "HasLocalTarget = {}]",
+                _is_push_down, _get_explain_state_string(), _is_ignored, _has_remote_target,
+                _has_local_target);
+    }
+
+    std::string _get_explain_state_string() {
+        if (_state->enable_pipeline_exec()) {
+            return _rf_state_atomic.load(std::memory_order_acquire) == RuntimeFilterState::READY
+                           ? "READY"
+                   : _rf_state_atomic.load(std::memory_order_acquire) ==
+                                   RuntimeFilterState::TIME_OUT
+                           ? "TIME_OUT"
+                           : "NOT_READY";
+        } else {
+            return _rf_state == RuntimeFilterState::READY      ? "READY"
+                   : _rf_state == RuntimeFilterState::TIME_OUT ? "TIME_OUT"
+                                                               : "NOT_READY";
+        }
+    }
 
     RuntimeState* _state;
     ObjectPool* _pool;
@@ -259,7 +331,8 @@ protected:
     // will apply to local node
     bool _has_local_target;
     // filter is ready for consumer
-    bool _is_ready;
+    RuntimeFilterState _rf_state;
+    std::atomic<RuntimeFilterState> _rf_state_atomic;
     // role consumer or producer
     RuntimeFilterRole _role;
     // expr index
@@ -267,6 +340,8 @@ protected:
     // used for await or signal
     std::mutex _inner_mutex;
     std::condition_variable _inner_cv;
+
+    bool _is_push_down = false;
 
     // if set always_true = true
     // this filter won't filter any data
@@ -282,7 +357,7 @@ protected:
 
     // Indicate whether runtime filter expr has been ignored
     bool _is_ignored;
-    std::string _ignored_msg = "";
+    std::string _ignored_msg;
 
     // some runtime filter will generate
     // multiple contexts such as minmax filter
@@ -299,8 +374,6 @@ protected:
     std::unique_ptr<RuntimeProfile> _profile;
     // unix millis
     RuntimeProfile::Counter* _await_time_cost = nullptr;
-    RuntimeProfile::Counter* _effect_time_cost = nullptr;
-    std::unique_ptr<ScopedTimer<MonotonicStopWatch>> _effect_timer;
 
     /// Time in ms (from MonotonicMillis()), that the filter was registered.
     const int64_t registration_time_;

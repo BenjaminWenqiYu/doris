@@ -25,6 +25,7 @@
 #include "runtime/broker_mgr.h"
 #include "runtime/client_cache.h"
 #include "runtime/exec_env.h"
+#include "util/defer_op.h"
 
 namespace doris {
 
@@ -76,23 +77,24 @@ Status BrokerReader::open() {
     request.__set_clientId(client_id(_env, broker_addr));
     request.__set_properties(_properties);
 
-    TBrokerOpenReaderResponse response;
+    TBrokerOpenReaderResponse* response = new TBrokerOpenReaderResponse();
+    Defer del_reponse {[&] { delete response; }};
     try {
         Status status;
         BrokerServiceConnection client(client_cache(_env), broker_addr,
                                        config::thrift_rpc_timeout_ms, &status);
         if (!status.ok()) {
             LOG(WARNING) << "Create broker client failed. broker=" << broker_addr
-                         << ", status=" << status.get_error_msg();
+                         << ", status=" << status;
             return status;
         }
 
         try {
-            client->openReader(response, request);
+            client->openReader(*response, request);
         } catch (apache::thrift::transport::TTransportException& e) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
             RETURN_IF_ERROR(client.reopen());
-            client->openReader(response, request);
+            client->openReader(*response, request);
         }
     } catch (apache::thrift::TException& e) {
         std::stringstream ss;
@@ -101,21 +103,21 @@ Status BrokerReader::open() {
         return Status::RpcError(ss.str());
     }
 
-    if (response.opStatus.statusCode != TBrokerOperationStatusCode::OK) {
+    if (response->opStatus.statusCode != TBrokerOperationStatusCode::OK) {
         std::stringstream ss;
         ss << "Open broker reader failed, broker:" << broker_addr
-           << " failed:" << response.opStatus.message;
+           << " failed:" << response->opStatus.message;
         LOG(WARNING) << ss.str();
         return Status::InternalError(ss.str());
     }
     // TODO(cmy): The file size is no longer got from openReader() method.
     // But leave the code here for compatibility.
     // This will be removed later.
-    if (response.__isset.size) {
-        _file_size = response.size;
+    if (response->__isset.size) {
+        _file_size = response->size;
     }
 
-    _fd = response.fd;
+    _fd = response->fd;
     _is_fd_valid = true;
     return Status::OK();
 }
@@ -151,7 +153,7 @@ Status BrokerReader::readat(int64_t position, int64_t nbytes, int64_t* bytes_rea
                                        config::thrift_rpc_timeout_ms, &status);
         if (!status.ok()) {
             LOG(WARNING) << "Create broker client failed. broker=" << broker_addr
-                         << ", status=" << status.get_error_msg();
+                         << ", status=" << status;
             return status;
         }
 
@@ -226,7 +228,7 @@ void BrokerReader::close() {
                                        config::thrift_rpc_timeout_ms, &status);
         if (!status.ok()) {
             LOG(WARNING) << "Create broker client failed. broker=" << broker_addr
-                         << ", status=" << status.get_error_msg();
+                         << ", status=" << status;
             return;
         }
 
@@ -237,7 +239,7 @@ void BrokerReader::close() {
             status = client.reopen();
             if (!status.ok()) {
                 LOG(WARNING) << "Close broker reader failed. broker=" << broker_addr
-                             << ", status=" << status.get_error_msg();
+                             << ", status=" << status;
                 return;
             }
             client->closeReader(response, request);

@@ -34,6 +34,9 @@ struct TColumn {
     10: optional list<TColumn> children_column
     11: optional i32 col_unique_id  = -1
     12: optional bool has_bitmap_index = false
+    13: optional bool has_ngram_bf_index = false
+    14: optional i32 gram_size
+    15: optional i32 gram_bf_size
 }
 
 struct TSlotDescriptor {
@@ -103,7 +106,8 @@ enum TSchemaTableType {
     SCH_VARIABLES,
     SCH_VIEWS,
     SCH_INVALID,
-    SCH_ROWSETS
+    SCH_ROWSETS,
+    SCH_BACKENDS
 }
 
 enum THdfsCompression {
@@ -117,7 +121,10 @@ enum THdfsCompression {
 }
 
 enum TIndexType {
-  BITMAP
+  BITMAP,
+  INVERTED,
+  BLOOMFILTER,
+  NGRAM_BF
 }
 
 // Mapping from names defined by Avro to the enum.
@@ -175,7 +182,7 @@ struct TOlapTableIndexSchema {
     1: required i64 id
     2: required list<string> columns
     3: required i32 schema_hash
-    4: required list<TColumn> columns_desc
+    4: optional list<TColumn> columns_desc
 }
 
 struct TOlapTableSchemaParam {
@@ -194,6 +201,8 @@ struct TOlapTableIndex {
   2: optional list<string> columns
   3: optional TIndexType index_type
   4: optional string comment
+  5: optional i64 index_id
+  6: optional map<string, string> properties
 }
 
 struct TTabletLocation {

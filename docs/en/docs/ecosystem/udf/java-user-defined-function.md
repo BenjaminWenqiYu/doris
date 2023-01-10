@@ -26,6 +26,12 @@ under the License.
 
 # Java UDF
 
+<version since="1.2.0">
+
+Java UDF
+
+</version>
+
 Java UDF provides users with a Java interface written in UDF to facilitate the execution of user-defined functions in Java language. Compared with native UDF implementation, Java UDF has the following advantages and limitations:
 1. The advantages
 * Compatibility: Using Java UDF can be compatible with different Doris versions, so when upgrading Doris version, Java UDF does not need additional migration. At the same time, Java UDF also follows the same programming specifications as hive / spark and other engines, so that users can directly move Hive / Spark UDF jar to Doris.
@@ -75,28 +81,40 @@ Instructions:
 1. `symbol` in properties represents the class name containing UDF classes. This parameter must be set.
 2. The jar package containing UDF represented by `file` in properties must be set.
 3. The UDF call type represented by `type` in properties is native by default. When using java UDF, it is transferred to `Java_UDF`.
-4. `name`: A function belongs to a DB and name is of the form`dbName`.`funcName`. When `dbName` is not explicitly specified, the db of the current session is used`dbName`.
+4. In PROPERTIES `always_nullable` indicates whether there may be a NULL value in the UDF return result. It is an optional parameter. The default value is true.
+5. `name`: A function belongs to a DB and name is of the form`dbName`.`funcName`. When `dbName` is not explicitly specified, the db of the current session is used`dbName`.
 
 Sample：
 ```sql
 CREATE FUNCTION java_udf_add_one(int) RETURNS int PROPERTIES (
     "file"="file:///path/to/java-udf-demo-jar-with-dependencies.jar",
     "symbol"="org.apache.doris.udf.AddOne",
+    "always_nullable"="true",
     "type"="JAVA_UDF"
 );
 ```
+* "file"=" http://IP:port/udf -code. Jar ", you can also use http to download jar packages in a multi machine environment.
 
+* The "always_nullable" is optional attribute, if there is special treatment for the NULL value in the calculation, it is determined that the result will not return NULL, and it can be set to false, so that the performance may be better in the whole calculation process.
+
+* If you use the local path method, the jar package that the database driver depends on, the FE and BE nodes must be placed here
 ## Create UDAF
 <br/>
 When using Java code to write UDAF, there are some functions that must be implemented (mark required) and an inner class State, which will be explained with a specific example below.
 The following SimpleDemo will implement a simple function similar to sum, the input parameter is INT, and the output parameter is INT
 
 ```JAVA
-package org.apache.doris.udf;
+package org.apache.doris.udf.demo;
 
-public class SimpleDemo {
+import org.apache.hadoop.hive.ql.exec.UDAF;
+
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
+import java.io.IOException;
+
+public class SimpleDemo extends UDAF {
     //Need an inner class to store data
-    /*required*/  
+    /*required*/
     public static class State {
         /*some variables if you need */
         public int sum = 0;
@@ -110,13 +128,13 @@ public class SimpleDemo {
 
     /*required*/
     public void destroy(State state) {
-      /* here could do some destroy work if needed */
+        /* here could do some destroy work if needed */
     }
 
-    /*required*/ 
+    /*required*/
     //first argument is State, then other types your input
     public void add(State state, Integer val) {
-      /* here doing update work when input data*/
+        /* here doing update work when input data*/
         if (val != null) {
             state.sum += val;
         }
@@ -124,27 +142,36 @@ public class SimpleDemo {
 
     /*required*/
     public void serialize(State state, DataOutputStream out) {
-      /* serialize some data into buffer */
-        out.writeInt(state.sum);
+        /* serialize some data into buffer */
+        try {
+            out.writeInt(state.sum);
+        } catch ( IOException e ) {
+            throw new RuntimeException (e);
+        }
     }
 
     /*required*/
     public void deserialize(State state, DataInputStream in) {
-      /* deserialize get data from buffer before you put */
-        int val = in.readInt();
+        /* deserialize get data from buffer before you put */
+        int val = 0;
+        try {
+            val = in.readInt();
+        } catch ( IOException e ) {
+            throw new RuntimeException (e);
+        }
         state.sum = val;
     }
 
     /*required*/
     public void merge(State state, State rhs) {
-      /* merge data from state */
+        /* merge data from state */
         state.sum += rhs.sum;
     }
 
     /*required*/
     //return Type you defined
     public Integer getValue(State state) {
-      /* return finally result */
+        /* return finally result */
         return state.sum;
     }
 }
@@ -154,10 +181,13 @@ public class SimpleDemo {
 ```sql
 CREATE AGGREGATE FUNCTION simple_sum(INT) RETURNS INT PROPERTIES (
     "file"="file:///pathTo/java-udaf.jar",
-    "symbol"="org.apache.doris.udf.SimpleDemo",
+    "symbol"="org.apache.doris.udf.demo.SimpleDemo",
+    "always_nullable"="true",
     "type"="JAVA_UDF"
 );
 ```
+* The implemented jar package can be stored at local or in a remote server and downloaded via http, And each BE node must be able to obtain the jar package;
+Otherwise, the error status message "Couldn't open file..." will be returned
 
 Currently, UDTF are not supported.
 
@@ -176,8 +206,9 @@ When you no longer need UDF functions, you can delete a UDF function by the foll
 ## Example
 Examples of Java UDF are provided in the `samples/doris-demo/java-udf-demo/` directory. See the `README.md` in each directory for details on how to use it, Check it out [here](https://github.com/apache/incubator-doris/tree/master/samples/doris-demo/java-udf-demo)
 
-## Unsupported Use Case
-At present, Java UDF is still in the process of continuous development, so some features are **not completed**.
+## Instructions
 1. Complex data types (HLL, bitmap) are not supported.
-2. Memory management and statistics of JVM and Doris have not been unified.
+2. Currently, users are allowed to specify the maximum heap size of the JVM themselves. The configuration item is jvm_ max_ heap_ size.
+3. The udf of char type needs to use the String type when creating a function.
+4. Due to the problem that the jvm loads classes with the same name, do not use multiple classes with the same name as udf implementations at the same time. If you want to update the udf of a class with the same name, you need to restart be to reload the classpath.
 

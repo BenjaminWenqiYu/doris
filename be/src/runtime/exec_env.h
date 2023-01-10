@@ -17,6 +17,8 @@
 
 #pragma once
 
+#include <gen_cpp/FrontendService.h>
+
 #include <unordered_map>
 
 #include "common/config.h"
@@ -29,6 +31,9 @@ namespace vectorized {
 class VDataStreamMgr;
 class ScannerScheduler;
 } // namespace vectorized
+namespace pipeline {
+class TaskScheduler;
+}
 class BfdParser;
 class BrokerMgr;
 
@@ -46,9 +51,10 @@ class FragmentMgr;
 class ResultCache;
 class LoadPathMgr;
 class LoadStreamMgr;
+class NewLoadStreamMgr;
 class MemTrackerLimiter;
+class MemTracker;
 class StorageEngine;
-class MemTrackerTaskPool;
 class PriorityThreadPool;
 class PriorityWorkStealingThreadPool;
 class ResultBufferMgr;
@@ -62,9 +68,9 @@ class StreamLoadExecutor;
 class RoutineLoadTaskExecutor;
 class SmallFileMgr;
 class StoragePolicyMgr;
+class BlockSpillManager;
 
 class BackendServiceClient;
-class FrontendServiceClient;
 class TPaloBrokerServiceClient;
 class PBackendService_Stub;
 class PFunctionService_Stub;
@@ -80,7 +86,7 @@ class HeartbeatFlags;
 // once to properly initialise service state.
 class ExecEnv {
 public:
-    // Initial exec enviorment. must call this to init all
+    // Initial exec environment. must call this to init all
     static Status init(ExecEnv* env, const std::vector<StorePath>& store_paths);
     static void destroy(ExecEnv* exec_env);
 
@@ -99,10 +105,9 @@ public:
     // declarations for classes in scoped_ptrs.
     ~ExecEnv();
 
-    const bool initialized() { return _is_init; }
+    const bool initialized() const { return _is_init; }
     const std::string& token() const;
     ExternalScanContextMgr* external_scan_context_mgr() { return _external_scan_context_mgr; }
-    DataStreamMgr* stream_mgr() { return _stream_mgr; }
     doris::vectorized::VDataStreamMgr* vstream_mgr() { return _vstream_mgr; }
     ResultBufferMgr* result_mgr() { return _result_mgr; }
     ResultQueueMgr* result_queue_mgr() { return _result_queue_mgr; }
@@ -110,21 +115,20 @@ public:
     ClientCache<FrontendServiceClient>* frontend_client_cache() { return _frontend_client_cache; }
     ClientCache<TPaloBrokerServiceClient>* broker_client_cache() { return _broker_client_cache; }
 
+    pipeline::TaskScheduler* pipeline_task_scheduler() { return _pipeline_task_scheduler; }
+
     // using template to simplify client cache management
     template <typename T>
     ClientCache<T>* get_client_cache() {
         return nullptr;
     }
 
-    std::shared_ptr<MemTrackerLimiter> process_mem_tracker() { return _process_mem_tracker; }
-    MemTrackerLimiter* process_mem_tracker_raw() { return _process_mem_tracker_raw; }
-    void set_process_mem_tracker(const std::shared_ptr<MemTrackerLimiter>& tracker) {
-        _process_mem_tracker = tracker;
-        _process_mem_tracker_raw = tracker.get();
+    void set_orphan_mem_tracker(const std::shared_ptr<MemTrackerLimiter>& orphan_tracker) {
+        _orphan_mem_tracker = orphan_tracker;
+        _orphan_mem_tracker_raw = orphan_tracker.get();
     }
-    std::shared_ptr<MemTrackerLimiter> query_pool_mem_tracker() { return _query_pool_mem_tracker; }
-    std::shared_ptr<MemTrackerLimiter> load_pool_mem_tracker() { return _load_pool_mem_tracker; }
-    MemTrackerTaskPool* task_pool_mem_tracker_registry() { return _task_pool_mem_tracker_registry; }
+    std::shared_ptr<MemTrackerLimiter> orphan_mem_tracker() { return _orphan_mem_tracker; }
+    MemTrackerLimiter* orphan_mem_tracker_raw() { return _orphan_mem_tracker_raw; }
     ThreadResourceMgr* thread_mgr() { return _thread_mgr; }
     PriorityThreadPool* scan_thread_pool() { return _scan_thread_pool; }
     PriorityThreadPool* remote_scan_thread_pool() { return _remote_scan_thread_pool; }
@@ -138,12 +142,9 @@ public:
     ThreadPoolToken* get_serial_download_cache_thread_token() {
         return _serial_download_cache_thread_token.get();
     }
-    void init_download_cache_buf() {
-        std::unique_ptr<char[]> download_cache_buf(new char[config::download_cache_buffer_size]);
-        memset(download_cache_buf.get(), 0, config::download_cache_buffer_size);
-        _download_cache_buf_map[_serial_download_cache_thread_token.get()] =
-                std::move(download_cache_buf);
-    }
+    void init_download_cache_buf();
+    void init_download_cache_required_components();
+    Status init_pipeline_task_scheduler();
     char* get_download_cache_buf(ThreadPoolToken* token) {
         if (_download_cache_buf_map.find(token) == _download_cache_buf_map.end()) {
             return nullptr;
@@ -168,8 +169,10 @@ public:
     BufferPool* buffer_pool() { return _buffer_pool; }
     LoadChannelMgr* load_channel_mgr() { return _load_channel_mgr; }
     LoadStreamMgr* load_stream_mgr() { return _load_stream_mgr; }
+    NewLoadStreamMgr* new_load_stream_mgr() { return _new_load_stream_mgr; }
     SmallFileMgr* small_file_mgr() { return _small_file_mgr; }
     StoragePolicyMgr* storage_policy_mgr() { return _storage_policy_mgr; }
+    BlockSpillManager* block_spill_mgr() { return _block_spill_mgr; }
 
     const std::vector<StorePath>& store_paths() const { return _store_paths; }
     size_t store_path_to_index(const std::string& path) { return _store_path_map[path]; }
@@ -181,25 +184,32 @@ public:
     HeartbeatFlags* heartbeat_flags() { return _heartbeat_flags; }
     doris::vectorized::ScannerScheduler* scanner_scheduler() { return _scanner_scheduler; }
 
+    // only for unit test
+    void set_master_info(TMasterInfo* master_info) { this->_master_info = master_info; }
+    void set_new_load_stream_mgr(NewLoadStreamMgr* new_load_stream_mgr) {
+        this->_new_load_stream_mgr = new_load_stream_mgr;
+    }
+    void set_stream_load_executor(StreamLoadExecutor* stream_load_executor) {
+        this->_stream_load_executor = stream_load_executor;
+    }
+
 private:
     Status _init(const std::vector<StorePath>& store_paths);
     void _destroy();
 
-    Status _init_mem_tracker();
+    Status _init_mem_env();
     /// Initialise 'buffer_pool_' with given capacity.
     void _init_buffer_pool(int64_t min_page_len, int64_t capacity, int64_t clean_pages_limit);
 
     void _register_metrics();
     void _deregister_metrics();
 
-private:
     bool _is_init;
     std::vector<StorePath> _store_paths;
     // path => store index
     std::map<std::string, size_t> _store_path_map;
     // Leave protected so that subclasses can override
     ExternalScanContextMgr* _external_scan_context_mgr = nullptr;
-    DataStreamMgr* _stream_mgr = nullptr;
     doris::vectorized::VDataStreamMgr* _vstream_mgr = nullptr;
     ResultBufferMgr* _result_mgr = nullptr;
     ResultQueueMgr* _result_queue_mgr = nullptr;
@@ -208,15 +218,13 @@ private:
     ClientCache<TPaloBrokerServiceClient>* _broker_client_cache = nullptr;
     ThreadResourceMgr* _thread_mgr = nullptr;
 
-    // The ancestor for all trackers. Every tracker is visible from the process down.
-    // Not limit total memory by process tracker, and it's just used to track virtual memory of process.
-    std::shared_ptr<MemTrackerLimiter> _process_mem_tracker;
-    MemTrackerLimiter* _process_mem_tracker_raw;
-    // The ancestor for all querys tracker.
-    std::shared_ptr<MemTrackerLimiter> _query_pool_mem_tracker;
-    // The ancestor for all load tracker.
-    std::shared_ptr<MemTrackerLimiter> _load_pool_mem_tracker;
-    MemTrackerTaskPool* _task_pool_mem_tracker_registry;
+    // The default tracker consumed by mem hook. If the thread does not attach other trackers,
+    // by default all consumption will be passed to the process tracker through the orphan tracker.
+    // In real time, `consumption of all limiter trackers` + `orphan tracker consumption` = `process tracker consumption`.
+    // Ideally, all threads are expected to attach to the specified tracker, so that "all memory has its own ownership",
+    // and the consumption of the orphan mem tracker is close to 0, but greater than 0.
+    std::shared_ptr<MemTrackerLimiter> _orphan_mem_tracker;
+    MemTrackerLimiter* _orphan_mem_tracker_raw;
 
     // The following two thread pools are used in different scenarios.
     // _scan_thread_pool is a priority thread pool.
@@ -242,6 +250,7 @@ private:
     std::unordered_map<ThreadPoolToken*, std::unique_ptr<char[]>> _download_cache_buf_map;
     CgroupsMgr* _cgroups_mgr = nullptr;
     FragmentMgr* _fragment_mgr = nullptr;
+    pipeline::TaskScheduler* _pipeline_task_scheduler = nullptr;
     ResultCache* _result_cache = nullptr;
     TMasterInfo* _master_info = nullptr;
     LoadPathMgr* _load_path_mgr = nullptr;
@@ -252,6 +261,7 @@ private:
     BrokerMgr* _broker_mgr = nullptr;
     LoadChannelMgr* _load_channel_mgr = nullptr;
     LoadStreamMgr* _load_stream_mgr = nullptr;
+    NewLoadStreamMgr* _new_load_stream_mgr = nullptr;
     BrpcClientCache<PBackendService_Stub>* _internal_client_cache = nullptr;
     BrpcClientCache<PFunctionService_Stub>* _function_client_cache = nullptr;
 
@@ -265,6 +275,8 @@ private:
     HeartbeatFlags* _heartbeat_flags = nullptr;
     StoragePolicyMgr* _storage_policy_mgr = nullptr;
     doris::vectorized::ScannerScheduler* _scanner_scheduler = nullptr;
+
+    BlockSpillManager* _block_spill_mgr = nullptr;
 };
 
 template <>

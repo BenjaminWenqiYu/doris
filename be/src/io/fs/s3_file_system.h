@@ -40,7 +40,7 @@ public:
 
     Status create_file(const Path& path, FileWriterPtr* writer) override;
 
-    Status open_file(const Path& path, FileReaderSPtr* reader) override;
+    Status open_file(const Path& path, FileReaderSPtr* reader, IOContext* io_ctx) override;
 
     Status delete_file(const Path& path) override;
 
@@ -75,7 +75,6 @@ public:
     // Guarded by external lock.
     void set_sk(std::string sk) { _s3_conf.sk = std::move(sk); }
 
-private:
     std::string get_key(const Path& path) const;
 
 private:

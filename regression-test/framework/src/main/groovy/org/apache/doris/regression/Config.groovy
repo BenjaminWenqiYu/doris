@@ -50,7 +50,7 @@ class Config {
     public String suitePath
     public String dataPath
     public String realDataPath
-    public String sf1DataPath
+    public String cacheDataPath
     public String pluginPath
 
     public String testGroups
@@ -87,7 +87,7 @@ class Config {
 
     Config(String defaultDb, String jdbcUrl, String jdbcUser, String jdbcPassword,
            String feHttpAddress, String feHttpUser, String feHttpPassword, String metaServiceHttpAddress,
-           String suitePath, String dataPath, String realDataPath, String sf1DataPath,
+           String suitePath, String dataPath, String realDataPath, String cacheDataPath,
            String testGroups, String excludeGroups, String testSuites, String excludeSuites,
            String testDirectories, String excludeDirectories, String pluginPath) {
         this.defaultDb = defaultDb
@@ -101,7 +101,7 @@ class Config {
         this.suitePath = suitePath
         this.dataPath = dataPath
         this.realDataPath = realDataPath
-        this.sf1DataPath = sf1DataPath
+        this.cacheDataPath = cacheDataPath
         this.testGroups = testGroups
         this.excludeGroups = excludeGroups
         this.testSuites = testSuites
@@ -121,15 +121,20 @@ class Config {
             def systemProperties = Maps.newLinkedHashMap(System.getProperties())
             configSlurper.setBinding(systemProperties)
             ConfigObject configObj = configSlurper.parse(new File(confFilePath).toURI().toURL())
+            String customConfFilePath = confFile.getParentFile().getPath() + "/regression-conf-custom.groovy"
+            File custFile = new File(customConfFilePath)
+            if (custFile.exists() && custFile.isFile()) {
+                ConfigObject custConfigObj = configSlurper.parse(new File(customConfFilePath).toURI().toURL())
+                configObj.merge(custConfigObj)
+            }
             config = Config.fromConfigObject(configObj)
         }
-
         fillDefaultConfig(config)
 
         config.suitePath = FileUtils.getCanonicalPath(cmd.getOptionValue(pathOpt, config.suitePath))
         config.dataPath = FileUtils.getCanonicalPath(cmd.getOptionValue(dataOpt, config.dataPath))
         config.realDataPath = FileUtils.getCanonicalPath(cmd.getOptionValue(realDataOpt, config.realDataPath))
-        config.sf1DataPath = cmd.getOptionValue(sf1DataOpt, config.sf1DataPath)
+        config.cacheDataPath = cmd.getOptionValue(cacheDataOpt, config.cacheDataPath)
         config.pluginPath = FileUtils.getCanonicalPath(cmd.getOptionValue(pluginOpt, config.pluginPath))
         config.suiteWildcard = cmd.getOptionValue(suiteOpt, config.testSuites)
                 .split(",")
@@ -162,6 +167,12 @@ class Config {
                 .findAll({d -> d != null && d.length() > 0})
                 .toSet()
 
+        if (!config.suiteWildcard && !config.groups && !config.directories && !config.excludeSuiteWildcard
+            && !config.excludeGroupSet && !config.excludeDirectorySet) {
+            log.info("no suites/directories/groups specified, set groups to p0".toString())
+            config.groups = ["p0"].toSet()
+        }
+
         config.feHttpAddress = cmd.getOptionValue(feHttpAddressOpt, config.feHttpAddress)
         try {
             Inet4Address host = Inet4Address.getByName(config.feHttpAddress.split(":")[0]) as Inet4Address
@@ -189,8 +200,8 @@ class Config {
         config.feHttpPassword = cmd.getOptionValue(feHttpPasswordOpt, config.feHttpPassword)
         config.generateOutputFile = cmd.hasOption(genOutOpt)
         config.forceGenerateOutputFile = cmd.hasOption(forceGenOutOpt)
-        config.parallel = Integer.parseInt(cmd.getOptionValue(parallelOpt, "1"))
-        config.suiteParallel = Integer.parseInt(cmd.getOptionValue(suiteParallelOpt, "1"))
+        config.parallel = Integer.parseInt(cmd.getOptionValue(parallelOpt, "10"))
+        config.suiteParallel = Integer.parseInt(cmd.getOptionValue(suiteParallelOpt, "10"))
         config.actionParallel = Integer.parseInt(cmd.getOptionValue(actionParallelOpt, "10"))
         config.times = Integer.parseInt(cmd.getOptionValue(timesOpt, "1"))
         config.randomOrder = cmd.hasOption(randomOrderOpt)
@@ -225,7 +236,7 @@ class Config {
             configToString(obj.suitePath),
             configToString(obj.dataPath),
             configToString(obj.realDataPath),
-            configToString(obj.sf1DataPath),
+            configToString(obj.cacheDataPath),
             configToString(obj.testGroups),
             configToString(obj.excludeGroups),
             configToString(obj.testSuites),
@@ -255,7 +266,8 @@ class Config {
         }
 
         if (config.jdbcUrl == null) {
-            config.jdbcUrl = "jdbc:mysql://127.0.0.1:9030"
+            //jdbcUrl needs parameter here. Refer to function: buildUrl(String dbName)
+            config.jdbcUrl = "jdbc:mysql://127.0.0.1:9030/?useLocalSessionState=true"
             log.info("Set jdbcUrl to '${config.jdbcUrl}' because not specify.".toString())
         }
 
@@ -304,9 +316,9 @@ class Config {
             log.info("Set realDataPath to '${config.realDataPath}' because not specify.".toString())
         }
 
-        if (config.sf1DataPath == null) {
-            config.sf1DataPath = "regression-test/sf1Data"
-            log.info("Set sf1DataPath to '${config.sf1DataPath}' because not specify.".toString())
+        if (config.cacheDataPath == null) {
+            config.cacheDataPath = "regression-test/cacheData"
+            log.info("Set cacheDataPath to '${config.cacheDataPath}' because not specify.".toString())
         }
 
         if (config.pluginPath == null) {
@@ -403,11 +415,16 @@ class Config {
         // e.g.
         // suites/tpcds_sf1/load.groovy
         // suites/tpcds_sf1/sql/q01.sql
-        if (dir.indexOf(File.separator + "sql") > 0 && dir.endsWith("sql")) {
-            dir = dir.substring(0, dir.indexOf(File.separator + "sql"))
+        // suites/tpcds_sf1/sql/dir/q01.sql
+        if (dir.indexOf(File.separator + "sql", dir.length() - 4) > 0 && dir.endsWith("sql")) {
+            dir = dir.substring(0, dir.indexOf(File.separator + "sql", dir.length() - 4))
+        }
+        if (dir.indexOf(File.separator + "sql" + File.separator) > 0) {
+            dir = dir.substring(0, dir.indexOf(File.separator + "sql" + File.separator))
         }
 
         dir = dir.replace('-', '_')
+        dir = dir.replace('.', '_')
 
         return defaultDb + '_' + dir.replace(File.separator, '_')
     }

@@ -29,7 +29,7 @@ namespace doris::vectorized {
 
 template <typename T>
 struct Avg {
-    using FieldType = std::conditional_t<IsDecimalNumber<T>, Decimal128, NearestFieldType<T>>;
+    using FieldType = typename AvgNearestFieldTypeTrait<T>::Type;
     using Function = AggregateFunctionAvg<T, AggregateFunctionAvgData<FieldType>>;
 };
 

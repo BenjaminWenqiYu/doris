@@ -26,6 +26,7 @@ import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.ErrorCode;
 import org.apache.doris.common.ErrorReport;
 import org.apache.doris.common.UserException;
+import org.apache.doris.common.util.VectorizedUtil;
 import org.apache.doris.rewrite.ExprRewriter;
 
 import com.google.common.base.Preconditions;
@@ -164,6 +165,8 @@ public abstract class QueryStmt extends StatementBase implements Queriable {
      */
     private Set<TupleId> disableTuplesMVRewriter = Sets.newHashSet();
 
+    protected boolean toSQLWithSelectList;
+
     QueryStmt(ArrayList<OrderByElement> orderByElements, LimitElement limitElement) {
         this.orderByElements = orderByElements;
         this.limitElement = limitElement;
@@ -185,8 +188,7 @@ public abstract class QueryStmt extends StatementBase implements Queriable {
     }
 
     private void analyzeLimit(Analyzer analyzer) throws AnalysisException {
-        // TODO chenhao
-        if (limitElement.getOffset() > 0 && !hasOrderByClause()) {
+        if (!VectorizedUtil.isVectorized() && limitElement.getOffset() > 0 && !hasOrderByClause()) {
             throw new AnalysisException("OFFSET requires an ORDER BY clause: "
                     + limitElement.toSql().trim());
         }
@@ -302,7 +304,7 @@ public abstract class QueryStmt extends StatementBase implements Queriable {
             isAscOrder.add(Boolean.valueOf(orderByElement.getIsAsc()));
             nullsFirstParams.add(orderByElement.getNullsFirstParam());
         }
-        substituteOrdinalsAliases(orderingExprs, "ORDER BY", analyzer);
+        substituteOrdinalsAliases(orderingExprs, "ORDER BY", analyzer, true);
 
         // save the order by element after analyzed
         orderByElementsAfterAnalyzed = Lists.newArrayList();
@@ -415,7 +417,7 @@ public abstract class QueryStmt extends StatementBase implements Queriable {
      * Modifies exprs list in-place.
      */
     protected void substituteOrdinalsAliases(List<Expr> exprs, String errorPrefix,
-                                             Analyzer analyzer) throws AnalysisException {
+                                             Analyzer analyzer, boolean aliasFirst) throws AnalysisException {
         Expr ambiguousAlias = getFirstAmbiguousAlias(exprs);
         if (ambiguousAlias != null) {
             ErrorReport.reportAnalysisException(ErrorCode.ERR_NON_UNIQ_ERROR, ambiguousAlias.toColumnLabel());
@@ -430,7 +432,18 @@ public abstract class QueryStmt extends StatementBase implements Queriable {
             // alias substitution is not performed in the same way.
             Expr substituteExpr = trySubstituteOrdinal(expr, errorPrefix, analyzer);
             if (substituteExpr == null) {
-                substituteExpr = expr.trySubstitute(aliasSMap, analyzer, false);
+                if (aliasFirst) {
+                    substituteExpr = expr.trySubstitute(aliasSMap, analyzer, false);
+                } else {
+                    try {
+                        // use col name from tableRefs first
+                        substituteExpr = expr.clone();
+                        substituteExpr.analyze(analyzer);
+                    } catch (AnalysisException ex) {
+                        // then consider alias name
+                        substituteExpr = expr.trySubstitute(aliasSMap, analyzer, false);
+                    }
+                }
             }
             i.set(substituteExpr);
         }
@@ -608,10 +621,11 @@ public abstract class QueryStmt extends StatementBase implements Queriable {
         return limitElement.getLimit();
     }
 
-    public void setLimit(long limit) throws AnalysisException {
+    public void setLimit(long limit) {
         Preconditions.checkState(limit >= 0);
         long newLimit = hasLimitClause() ? Math.min(limit, getLimit()) : limit;
-        limitElement = new LimitElement(newLimit);
+        long offset = hasLimitClause() ? getOffset() : 0;
+        limitElement = new LimitElement(offset, newLimit);
     }
 
     public void removeLimitElement() {
@@ -794,4 +808,10 @@ public abstract class QueryStmt extends StatementBase implements Queriable {
     public boolean hasOutFileClause() {
         return outFileClause != null;
     }
+
+    public String toSqlWithSelectList() {
+        toSQLWithSelectList = true;
+        return toSql();
+    }
+
 }

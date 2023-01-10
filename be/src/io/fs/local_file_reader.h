@@ -20,6 +20,7 @@
 #include <atomic>
 
 #include "io/fs/file_reader.h"
+#include "io/fs/local_file_system.h"
 #include "io/fs/path.h"
 
 namespace doris {
@@ -27,13 +28,14 @@ namespace io {
 
 class LocalFileReader final : public FileReader {
 public:
-    LocalFileReader(Path path, size_t file_size, int fd);
+    LocalFileReader(Path path, size_t file_size, int fd, std::shared_ptr<LocalFileSystem> fs);
 
     ~LocalFileReader() override;
 
     Status close() override;
 
-    Status read_at(size_t offset, Slice result, size_t* bytes_read) override;
+    Status read_at(size_t offset, Slice result, const IOContext& io_ctx,
+                   size_t* bytes_read) override;
 
     const Path& path() const override { return _path; }
 
@@ -41,11 +43,14 @@ public:
 
     bool closed() const override { return _closed.load(std::memory_order_acquire); }
 
+    FileSystemSPtr fs() const override { return _fs; }
+
 private:
     int _fd = -1; // owned
     Path _path;
     size_t _file_size;
     std::atomic<bool> _closed = false;
+    std::shared_ptr<LocalFileSystem> _fs;
 };
 
 } // namespace io

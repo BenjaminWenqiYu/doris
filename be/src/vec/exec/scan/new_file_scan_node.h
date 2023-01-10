@@ -17,6 +17,7 @@
 
 #pragma once
 
+#include "vec/exec/format/format_common.h"
 #include "vec/exec/scan/vscan_node.h"
 
 namespace doris::vectorized {
@@ -24,6 +25,8 @@ namespace doris::vectorized {
 class NewFileScanNode : public VScanNode {
 public:
     NewFileScanNode(ObjectPool* pool, const TPlanNode& tnode, const DescriptorTbl& descs);
+
+    Status init(const TPlanNode& tnode, RuntimeState* state) override;
 
     Status prepare(RuntimeState* state) override;
 
@@ -34,15 +37,10 @@ protected:
     Status _process_conjuncts() override;
     Status _init_scanners(std::list<VScanner*>* scanners) override;
 
-protected:
-    std::vector<TExpr> _pre_filter_texprs;
-
 private:
     VScanner* _create_scanner(const TFileScanRange& scan_range);
 
-private:
     std::vector<TScanRangeParams> _scan_ranges;
-    TFileScanNode _file_scan_node;
-    std::unique_ptr<MemTracker> _scanner_mem_tracker;
+    KVCache<std::string> _kv_cache;
 };
 } // namespace doris::vectorized

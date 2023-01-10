@@ -287,6 +287,7 @@ struct TGetDbsParams {
   2: optional string user   // deprecated
   3: optional string user_ip    // deprecated
   4: optional Types.TUserIdentity current_user_ident // to replace the user and user ip
+  5: optional string catalog
 }
 
 // getDbNames returns a list of database names and catalog names
@@ -435,6 +436,7 @@ struct TMasterOpRequest {
     18: optional i64 insert_visible_timeout_ms // deprecated, move into session_variables
     19: optional map<string, string> session_variables
     20: optional bool foldConstantByBe
+    21: optional map<string, string> trace_carrier
 }
 
 struct TColumnDefinition {
@@ -458,6 +460,7 @@ struct TMasterOpResult {
     2: required binary packet;
     3: optional TShowResultSet resultSet;
     4: optional Types.TUniqueId queryId;
+    5: optional string status;
 }
 
 struct TUpdateExportTaskStatusRequest {
@@ -541,6 +544,9 @@ struct TStreamLoadPutRequest {
     37: optional bool load_to_single_tablet
     38: optional string header_type
     39: optional string hidden_columns
+    40: optional PlanNodes.TFileCompressType compress_type
+    41: optional i64 file_size // only for stream load with parquet or orc
+    42: optional bool trim_double_quotes // trim double quotes for csv
 }
 
 struct TStreamLoadPutResult {
@@ -675,6 +681,31 @@ struct TWaitingTxnStatusResult {
     2: optional i32 txn_status_id
 }
 
+struct TInitExternalCtlMetaRequest {
+    1: optional i64 catalogId
+    2: optional i64 dbId
+    3: optional i64 tableId
+}
+
+struct TInitExternalCtlMetaResult {
+    1: optional i64 maxJournalId;
+    2: optional string status;
+}
+
+enum TSchemaTableName{
+  BACKENDS = 0,
+}
+
+struct TFetchSchemaTableDataRequest {
+  1: optional string cluster_name
+  2: optional TSchemaTableName schema_table_name
+}
+
+struct TFetchSchemaTableDataResult {
+  1: required Status.TStatus status
+  2: optional list<Data.TRow> data_batch;
+}
+
 service FrontendService {
     TGetDbsResult getDbNames(1: TGetDbsParams params)
     TGetTablesResult getTableNames(1: TGetTablesParams params)
@@ -710,4 +741,7 @@ service FrontendService {
     TFrontendPingFrontendResult ping(1: TFrontendPingFrontendRequest request)
 
     AgentService.TGetStoragePolicyResult refreshStoragePolicy()
+    TInitExternalCtlMetaResult initExternalCtlMeta(1: TInitExternalCtlMetaRequest request)
+
+    TFetchSchemaTableDataResult fetchSchemaTableData(1: TFetchSchemaTableDataRequest request)
 }

@@ -99,7 +99,7 @@ Multiple copies of a Tablet may cause state inconsistencies due to certain circu
 
 6. FORCE\_REDUNDANT
 
-	This is a special state. It only occurs when the number of expected replicas is greater than or equal to the number of available nodes, and when the Tablet is in the state of replica missing. In this case, you need to delete a copy first to ensure that there are available nodes for creating a new copy.
+	This is a special state. It only occurs when the number of existed replicas is greater than or equal to the number of available nodes, and the number of available nodes is greater than or equal to the number of expected replicas, and when the number of alive replicas is less than the number of expected replicas. In this case, you need to delete a copy first to ensure that there are available nodes for creating a new copy.
 
 7. COLOCATE\_MISMATCH
 
@@ -319,7 +319,7 @@ Tablet state view mainly looks at the state of the tablet, as well as the state 
 
 	` The ADMIN SHOW REPLICA STATUS `command is mainly used to view the health status of copies. Users can also view additional information about copies of a specified table by using the following commands:
 
-	`SHOW TABLET FROM tbl1;`
+	`SHOW TABLETS FROM tbl1;`
 
     ```
 	+----------+-----------+-----------+------------+---------+-------------+-------------------+-----------------------+------------------+----------------------+---------------+----------+----------+--------+-------------------------+--------------+----------------------+--------------+----------------------+----------------------+----------------------+
@@ -385,7 +385,7 @@ Tablet state view mainly looks at the state of the tablet, as well as the state 
 	+-----------+-----------+---------+-------------+-------------------+-----------------------+------------------+----------------------+---------------+------------+----------+----------+--------+-------+--------------+----------------------+
     ```
    
-	The figure above shows all replicas of the corresponding Tablet. The content shown here is the same as `SHOW TABLET FROM tbl1;`. But here you can clearly see the status of all copies of a specific Tablet.
+	The figure above shows all replicas of the corresponding Tablet. The content shown here is the same as `SHOW TABLETS FROM tbl1;`. But here you can clearly see the status of all copies of a specific Tablet.
 
 ### Duplicate Scheduling Task
 
@@ -443,7 +443,7 @@ Tablet state view mainly looks at the state of the tablet, as well as the state 
 
 	You can view the current load of the cluster by following commands:
 
-	`SHOW PROC '/cluster_balance/cluster_load_stat';`
+	`SHOW PROC '/cluster_balance/cluster_load_stat/location_default';`
 
 	First of all, we can see the division of different storage media:
 
@@ -458,7 +458,7 @@ Tablet state view mainly looks at the state of the tablet, as well as the state 
 
 	Click on a storage medium to see the equilibrium state of the BE node that contains the storage medium:
 
-	`SHOW PROC '/cluster_balance/cluster_load_stat/HDD';`
+	`SHOW PROC '/cluster_balance/cluster_load_stat/location_default/HDD';`
 
 	```
 	+----------+-----------------+-----------+---------------+----------------+-------------+------------+----------+-----------+--------------------+-------+
@@ -488,7 +488,7 @@ Tablet state view mainly looks at the state of the tablet, as well as the state 
 
 	Users can further view the utilization of each path on a BE, such as the BE with ID 10001:
 
-	`SHOW PROC '/cluster_balance/cluster_load_stat/HDD/10001';`
+	`SHOW PROC '/cluster_balance/cluster_load_stat/location_default/HDD/10001';`
 
     ```
 	+------------------+------------------+---------------+---------------+---------+--------+----------------------+

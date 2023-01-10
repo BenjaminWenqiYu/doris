@@ -32,7 +32,7 @@ import com.google.common.base.Preconditions;
 
 import java.util.Map;
 
-public class SinglePartitionDesc {
+public class SinglePartitionDesc implements AllPartitionDesc {
     private boolean isAnalyzed;
 
     private boolean ifNotExists;
@@ -58,7 +58,7 @@ public class SinglePartitionDesc {
         this.partitionKeyDesc = partitionKeyDesc;
         this.properties = properties;
 
-        this.partitionDataProperty = DataProperty.DEFAULT_DATA_PROPERTY;
+        this.partitionDataProperty = new DataProperty(DataProperty.DEFAULT_STORAGE_MEDIUM);
         this.replicaAlloc = ReplicaAllocation.DEFAULT_ALLOCATION;
         this.storagePolicy = "";
     }
@@ -127,7 +127,7 @@ public class SinglePartitionDesc {
 
         // analyze data property
         partitionDataProperty = PropertyAnalyzer.analyzeDataProperty(properties,
-                DataProperty.DEFAULT_DATA_PROPERTY);
+                new DataProperty(DataProperty.DEFAULT_STORAGE_MEDIUM));
         Preconditions.checkNotNull(partitionDataProperty);
 
         // analyze replication num

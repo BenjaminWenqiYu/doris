@@ -151,7 +151,8 @@ enum FieldType {
     OLAP_FIELD_TYPE_TIMEV2 = 30,
     OLAP_FIELD_TYPE_DECIMAL32 = 31,
     OLAP_FIELD_TYPE_DECIMAL64 = 32,
-    OLAP_FIELD_TYPE_DECIMAL128 = 33
+    OLAP_FIELD_TYPE_DECIMAL128I = 33,
+    OLAP_FIELD_TYPE_JSONB = 34,
 };
 
 // Define all aggregation methods supported by Field
@@ -232,6 +233,13 @@ inline std::ostream& operator<<(std::ostream& os, const Version& version) {
     return os << version.to_string();
 }
 
+inline std::ostream& operator<<(std::ostream& os, const Versions& versions) {
+    for (auto& version : versions) {
+        os << version;
+    }
+    return os;
+}
+
 // used for hash-struct of hash_map<Version, Rowset*>.
 struct HashOfVersion {
     size_t operator()(const Version& version) const {
@@ -256,6 +264,17 @@ using KeyRange = std::pair<WrapperField*, WrapperField*>;
 
 static const int GENERAL_DEBUG_COUNT = 0;
 
+struct FileCacheStatistics {
+    int64_t num_io_total = 0;
+    int64_t num_io_hit_cache = 0;
+    int64_t num_io_bytes_read_total = 0;
+    int64_t num_io_bytes_read_from_file_cache = 0;
+    int64_t num_io_bytes_read_from_write_cache = 0;
+    int64_t num_io_written_in_file_cache = 0;
+    int64_t num_io_bytes_written_in_file_cache = 0;
+    int64_t num_io_bytes_skip_cache = 0;
+};
+
 // ReaderStatistics used to collect statistics when scan data from storage
 struct OlapReaderStatistics {
     int64_t io_ns = 0;
@@ -278,6 +297,7 @@ struct OlapReaderStatistics {
     // block_load_ns
     //      block_init_ns
     //          block_init_seek_ns
+    //          block_conditions_filtered_ns
     //      first_read_ns
     //          block_first_read_seek_ns
     //      lazy_read_ns
@@ -314,6 +334,7 @@ struct OlapReaderStatistics {
     int64_t rows_del_by_bitmap = 0;
     // the number of rows filtered by various column indexes.
     int64_t rows_conditions_filtered = 0;
+    int64_t block_conditions_filtered_ns = 0;
 
     int64_t index_load_ns = 0;
 
@@ -322,6 +343,11 @@ struct OlapReaderStatistics {
 
     int64_t rows_bitmap_index_filtered = 0;
     int64_t bitmap_index_filter_timer = 0;
+
+    int64_t rows_inverted_index_filtered = 0;
+    int64_t inverted_index_filter_timer = 0;
+
+    int64_t output_index_result_column_timer = 0;
     // number of segment filtered by column stat when creating seg iterator
     int64_t filtered_segment_number = 0;
     // total number of segment
@@ -329,7 +355,7 @@ struct OlapReaderStatistics {
     // general_debug_ns is designed for the purpose of DEBUG, to record any infomations of debugging or profiling.
     // different from specific meaningful timer such as index_load_ns, general_debug_ns can be used flexibly.
     // general_debug_ns has associated with OlapScanNode's _general_debug_timer already.
-    // so general_debug_ns' values will update to _general_debug_timer automaticly,
+    // so general_debug_ns' values will update to _general_debug_timer automatically,
     // the timer result can be checked through QueryProfile web page easily.
     // when search general_debug_ns, you can find that general_debug_ns has not been used,
     // this is because such codes added for debug purpose should not commit, it's just for debuging.
@@ -337,6 +363,9 @@ struct OlapReaderStatistics {
     // usage example:
     //               SCOPED_RAW_TIMER(&_stats->general_debug_ns[1]);
     int64_t general_debug_ns[GENERAL_DEBUG_COUNT] = {};
+
+    FileCacheStatistics file_cache_stats;
+    int64_t load_segments_timer = 0;
 };
 
 using ColumnId = uint32_t;

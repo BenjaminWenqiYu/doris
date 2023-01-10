@@ -43,6 +43,8 @@ struct SchemaScannerParam {
     const std::string* ip;                   // frontend ip
     int32_t port;                            // frontend thrift port
     int64_t thread_id;
+    const std::vector<TSchemaTableStructure>* table_structure;
+    const std::string* catalog;
 
     SchemaScannerParam()
             : db(nullptr),
@@ -52,7 +54,8 @@ struct SchemaScannerParam {
               user_ip(nullptr),
               current_user_ident(nullptr),
               ip(nullptr),
-              port(0) {}
+              port(0),
+              catalog(nullptr) {}
 };
 
 // virtual scanner for all schema table
@@ -68,6 +71,7 @@ public:
         int scale = -1;
     };
     SchemaScanner(ColumnDesc* columns, int column_num);
+    SchemaScanner(ColumnDesc* columns, int column_num, TSchemaTableType::type type);
     virtual ~SchemaScanner();
 
     // init object need information, schema etc.
@@ -84,6 +88,8 @@ public:
 
 protected:
     Status create_tuple_desc(ObjectPool* pool);
+    Status create_columns(const std::vector<TSchemaTableStructure>* table_structure,
+                          ObjectPool* pool);
 
     bool _is_init;
     // this is used for sub class
@@ -94,7 +100,13 @@ protected:
     int _column_num;
     TupleDescriptor* _tuple_desc;
 
+    // _is_create_columns means if ColumnDesc is created from FE.
+    // `_columns` should be deleted if _is_create_columns = true.
+    bool _is_create_columns = false;
+
     static DorisServer* _s_doris_server;
+
+    TSchemaTableType::type _schema_table_type;
 };
 
 } // namespace doris

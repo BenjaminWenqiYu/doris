@@ -90,6 +90,11 @@ else
             TEAMCITY=1
             shift
             ;;
+        --conf)
+            CUSTOM_CONFIG_FILE="$2"
+            shift
+            shift
+            ;;
         --run)
             RUN=1
             shift
@@ -121,7 +126,12 @@ fi
 export MVN_CMD
 
 CONF_DIR="${DORIS_HOME}/regression-test/conf"
-CONFIG_FILE="${CONF_DIR}/regression-conf.groovy"
+if [[ -n "${CUSTOM_CONFIG_FILE}" ]] && [[ -f "${CUSTOM_CONFIG_FILE}" ]]; then
+    CONFIG_FILE="${CUSTOM_CONFIG_FILE}"
+    echo "Using custom config file ${CONFIG_FILE}"
+else
+    CONFIG_FILE="${CONF_DIR}/regression-conf.groovy"
+fi
 LOG_CONFIG_FILE="${CONF_DIR}/logback.xml"
 
 FRAMEWORK_SOURCE_DIR="${DORIS_HOME}/regression-test/framework"
@@ -151,6 +161,16 @@ if ! test -f ${RUN_JAR:+${RUN_JAR}}; then
     cp -r "${REGRESSION_TEST_BUILD_DIR}"/regression-test-*.jar "${OUTPUT_DIR}/lib"
 fi
 
+# build jar needed by java-udf case
+JAVAUDF_JAR="${DORIS_HOME}/regression-test/java-udf-src/target/java-udf-case-jar-with-dependencies.jar"
+if ! test -f ${JAVAUDF_JAR:+${JAVAUDF_JAR}}; then
+    mkdir -p "${DORIS_HOME}"/regression-test/suites/javaudf_p0/jars
+    cd "${DORIS_HOME}"/regression-test/java-udf-src
+    "${MVN_CMD}" package
+    cp target/java-udf-case-jar-with-dependencies.jar "${DORIS_HOME}"/regression-test/suites/javaudf_p0/jars/
+    cd "${DORIS_HOME}"
+fi
+
 # check java home
 if [[ -z "${JAVA_HOME}" ]]; then
     echo "Error: JAVA_HOME is not set"
@@ -177,6 +197,7 @@ fi
 
 "${JAVA}" -DDORIS_HOME="${DORIS_HOME}" \
     -DLOG_PATH="${LOG_OUTPUT_FILE}" \
+    -Dfile.encoding="UTF-8" \
     -Dlogback.configurationFile="${LOG_CONFIG_FILE}" \
     ${JAVA_OPTS:+${JAVA_OPTS}} \
     -jar ${RUN_JAR:+${RUN_JAR}} \

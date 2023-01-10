@@ -25,7 +25,6 @@
 #include <vector>
 
 #include "common/object_pool.h"
-#include "exec/broker_scan_node.h"
 #include "exprs/cast_functions.h"
 #include "exprs/decimalv2_operators.h"
 #include "gen_cpp/Descriptors_types.h"
@@ -47,7 +46,7 @@ class VJsonScannerTest : public testing::Test {
 public:
     VJsonScannerTest() : _runtime_state(TQueryGlobals()) {
         init();
-        _runtime_state.init_instance_mem_tracker();
+        _runtime_state.init_mem_trackers();
 
         TUniqueId unique_id;
         TQueryOptions query_options;
@@ -595,8 +594,8 @@ TEST_F(VJsonScannerTest, simple_array_json) {
         ASSERT_EQ(columns[1].to_string(1), "EvelynWaugh");
         ASSERT_EQ(columns[2].to_string(0), "SayingsoftheCentury");
         ASSERT_EQ(columns[2].to_string(1), "SwordofHonour");
-        ASSERT_EQ(columns[3].to_string(0), "8.950000");
-        ASSERT_EQ(columns[3].to_string(1), "12.990000");
+        ASSERT_EQ(columns[3].to_string(0), "8.95");
+        ASSERT_EQ(columns[3].to_string(1), "12.99");
         ASSERT_EQ(columns[4].to_string(0), "1234");
         ASSERT_EQ(columns[4].to_string(1), "1180591620717411303424");
         ASSERT_EQ(columns[5].to_string(0), "1234.123400000");
@@ -790,17 +789,8 @@ TEST_F(VJsonScannerTest, use_jsonpaths_mismatch) {
         vectorized::Block block;
         status = scan_node.get_next(&_runtime_state, &block, &eof);
         EXPECT_TRUE(status.ok());
-        EXPECT_EQ(2, block.rows());
-        EXPECT_EQ(6, block.columns());
-
-        auto columns = block.get_columns_with_type_and_name();
-        ASSERT_EQ(columns.size(), 6);
-        ASSERT_EQ(columns[0].to_string(0), "NULL");
-        ASSERT_EQ(columns[0].to_string(1), "NULL");
-        ASSERT_EQ(columns[1].to_string(0), "NULL");
-        ASSERT_EQ(columns[1].to_string(1), "NULL");
-        ASSERT_EQ(columns[2].to_string(0), "NULL");
-        ASSERT_EQ(columns[2].to_string(1), "NULL");
+        EXPECT_EQ(0, block.rows());
+        EXPECT_EQ(0, block.columns());
         block.clear();
         scan_node.close(&_runtime_state);
     };

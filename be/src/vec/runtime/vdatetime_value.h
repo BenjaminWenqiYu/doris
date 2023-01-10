@@ -15,8 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_RUNTIME_VDATETIME_VALUE_H
-#define DORIS_BE_RUNTIME_VDATETIME_VALUE_H
+#pragma once
 
 #include <re2/re2.h>
 #include <stdint.h>
@@ -25,9 +24,7 @@
 #include <cstddef>
 #include <iostream>
 
-#include "cctz/civil_time.h"
 #include "cctz/time_zone.h"
-#include "common/config.h"
 #include "udf/udf.h"
 #include "util/hash_util.hpp"
 #include "util/time_lut.h"
@@ -230,8 +227,8 @@ public:
               _year(0) {} // before int128  16 bytes  --->  after int64 8 bytes
 
     // The data format of DATE/DATETIME is different in storage layer and execute layer.
-    // So we should use diffrent creator to get data from value.
-    // We should use create_from_olap_xxx only at binary data scaned from storage engine and convert to typed data.
+    // So we should use different creator to get data from value.
+    // We should use create_from_olap_xxx only at binary data scanned from storage engine and convert to typed data.
     // At other case, we just use binary_cast<vectorized::Int64, vectorized::VecDateTimeValue>.
 
     // olap storage layer date data format:
@@ -461,6 +458,9 @@ public:
     template <TimeUnit unit>
     bool date_add_interval(const TimeInterval& interval);
 
+    template <TimeUnit unit>
+    bool datetime_trunc(); //datetime trunc, like trunc minute = 0
+
     //unix_timestamp is called with a timezone argument,
     //it returns seconds of the value of date literal since '1970-01-01 00:00:00' UTC
     bool unix_timestamp(int64_t* timestamp, const std::string& timezone) const;
@@ -523,26 +523,37 @@ public:
 
     const char* day_name() const;
 
-    VecDateTimeValue& operator++() {
+    VecDateTimeValue& operator+=(int64_t count) {
+        bool is_neg = false;
+        if (count < 0) {
+            is_neg = true;
+            count = -count;
+        }
         switch (_type) {
         case TIME_DATE: {
-            TimeInterval interval(DAY, 1, false);
+            TimeInterval interval(DAY, count, is_neg);
             date_add_interval<DAY>(interval);
             break;
         }
         case TIME_DATETIME: {
-            TimeInterval interval(SECOND, 1, false);
+            TimeInterval interval(SECOND, count, is_neg);
             date_add_interval<SECOND>(interval);
             break;
         }
         case TIME_TIME: {
-            TimeInterval interval(SECOND, 1, false);
+            TimeInterval interval(SECOND, count, is_neg);
             date_add_interval<SECOND>(interval);
             break;
         }
         }
         return *this;
     }
+
+    VecDateTimeValue& operator-=(int64_t count) { return *this += -count; }
+
+    VecDateTimeValue& operator++() { return *this += 1; }
+
+    VecDateTimeValue& operator--() { return *this += -1; }
 
     void to_datetime_val(doris_udf::DateTimeVal* tv) const {
         tv->packed_time = to_int64_datetime_packed();
@@ -717,19 +728,19 @@ public:
             std::conditional_t<std::is_same_v<T, DateTimeV2ValueType>, uint64_t, uint32_t>;
 
     // Constructor
-    DateV2Value<T>() : date_v2_value_(0, 0, 0, 0, 0, 0, 0) {}
+    DateV2Value() : date_v2_value_(0, 0, 0, 0, 0, 0, 0) {}
 
-    DateV2Value<T>(DateV2Value<T>& other) { int_val_ = other.to_date_int_val(); }
+    DateV2Value(DateV2Value<T>& other) { int_val_ = other.to_date_int_val(); }
 
-    DateV2Value<T>(const DateV2Value<T>& other) { int_val_ = other.to_date_int_val(); }
+    DateV2Value(const DateV2Value<T>& other) { int_val_ = other.to_date_int_val(); }
 
-    static DateV2Value<T> create_from_olap_date(uint64_t value) {
+    static DateV2Value create_from_olap_date(uint64_t value) {
         DateV2Value<T> date;
         date.from_olap_date(value);
         return date;
     }
 
-    static DateV2Value<T> create_from_olap_datetime(uint64_t value) {
+    static DateV2Value create_from_olap_datetime(uint64_t value) {
         DateV2Value<T> datetime;
         datetime.from_olap_datetime(value);
         return datetime;
@@ -779,17 +790,6 @@ public:
         val <<= 5;
         val |= date_v2_value_.day_;
         return val;
-    }
-
-    uint64_t to_olap_datetime() const {
-        uint64_t date_val =
-                date_v2_value_.year_ * 10000 + date_v2_value_.month_ * 100 + date_v2_value_.day_;
-        uint64_t time_val = 0;
-        if constexpr (is_datetime) {
-            time_val = date_v2_value_.hour_ * 10000 + date_v2_value_.minute_ * 100 +
-                       date_v2_value_.second_;
-        }
-        return date_val * 1000000 + time_val;
     }
 
     bool to_format_string(const char* format, int len, char* to) const;
@@ -923,6 +923,9 @@ public:
     template <TimeUnit unit>
     bool date_add_interval(const TimeInterval& interval);
 
+    template <TimeUnit unit>
+    bool datetime_trunc(); //datetime trunc, like trunc minute = 0
+
     //unix_timestamp is called with a timezone argument,
     //it returns seconds of the value of date literal since '1970-01-01 00:00:00' UTC
     bool unix_timestamp(int64_t* timestamp, const std::string& timezone) const;
@@ -1015,16 +1018,27 @@ public:
 
     const char* day_name() const;
 
-    DateV2Value<T>& operator++() {
+    DateV2Value<T>& operator+=(int64_t count) {
+        bool is_neg = false;
+        if (count < 0) {
+            is_neg = true;
+            count = -count;
+        }
         if constexpr (is_datetime) {
-            TimeInterval interval(SECOND, 1, false);
+            TimeInterval interval(SECOND, count, is_neg);
             date_add_interval<SECOND>(interval);
         } else {
-            TimeInterval interval(DAY, 1, false);
+            TimeInterval interval(DAY, count, is_neg);
             date_add_interval<DAY>(interval);
         }
         return *this;
     }
+
+    DateV2Value<T>& operator-=(int64_t count) { return *this += -count; }
+
+    DateV2Value<T>& operator++() { return *this += 1; }
+
+    DateV2Value<T>& operator--() { return *this += -1; }
 
     uint32_t hash(int seed) const { return HashUtil::hash(this, sizeof(*this), seed); }
 
@@ -1164,8 +1178,8 @@ private:
         underlying_value int_val_;
     };
 
-    DateV2Value<T>(uint16_t year, uint8_t month, uint8_t day, uint8_t hour, uint8_t minute,
-                   uint8_t second, uint32_t microsecond)
+    DateV2Value(uint16_t year, uint8_t month, uint8_t day, uint8_t hour, uint8_t minute,
+                uint8_t second, uint32_t microsecond)
             : date_v2_value_(year, month, day, hour, minute, second, microsecond) {}
 };
 
@@ -1462,6 +1476,31 @@ int64_t datetime_diff(const VecDateTimeValue& ts_value1, const DateV2Value<T>& t
     return 0;
 }
 
+class DataTypeDateTime;
+class DataTypeDateV2;
+class DataTypeDateTimeV2;
+
+template <typename T>
+struct DateTraits {};
+
+template <>
+struct DateTraits<int64_t> {
+    using T = VecDateTimeValue;
+    using DateType = DataTypeDateTime;
+};
+
+template <>
+struct DateTraits<uint32_t> {
+    using T = DateV2Value<DateV2ValueType>;
+    using DateType = DataTypeDateV2;
+};
+
+template <>
+struct DateTraits<uint64_t> {
+    using T = DateV2Value<DateTimeV2ValueType>;
+    using DateType = DataTypeDateTimeV2;
+};
+
 } // namespace vectorized
 } // namespace doris
 
@@ -1489,5 +1528,3 @@ struct hash<doris::vectorized::DateV2Value<doris::vectorized::DateTimeV2ValueTyp
     }
 };
 } // namespace std
-
-#endif

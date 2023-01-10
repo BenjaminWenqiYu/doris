@@ -25,6 +25,7 @@ set(UTIL_FILES
   arrow/row_batch.cpp
   arrow/row_block.cpp
   arrow/utils.cpp
+  arrow/block_convertor.cpp
   array_parser.cpp
   bfd_parser.cpp
   bitmap.cpp
@@ -63,7 +64,6 @@ set(UTIL_FILES
   url_coding.cpp
   file_utils.cpp
   mysql_row_buffer.cpp
-  tuple_row_compare.cpp
   error_util.cc
   filesystem_util.cc
   load_error_hub.cpp
@@ -107,18 +107,26 @@ set(UTIL_FILES
   hdfs_util.cpp
   time_lut.cpp
   topn_counter.cpp
+  cityhash102/city.cc
   tuple_row_zorder_compare.cpp
   telemetry/telemetry.cpp
   telemetry/brpc_carrier.cpp
   telemetry/open_telemetry_scop_wrapper.hpp
   quantile_state.cpp
   jni-util.cpp
+  exception.cpp
+  libjvm_loader.cpp
 )
 
 if (WITH_MYSQL)
     set(UTIL_FILES ${UTIL_FILES}
         mysql_load_error_hub.cpp
         )
+endif()
+
+if (OS_MACOSX)
+    list(REMOVE_ITEM UTIL_FILES perf_counters.cpp disk_info.cpp)
+    list(APPEND UTIL_FILES perf_counters_mac.cpp disk_info_mac.cpp)
 endif()
 
 add_library(Util STATIC

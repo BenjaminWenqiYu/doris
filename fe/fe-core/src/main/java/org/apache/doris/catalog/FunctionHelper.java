@@ -17,10 +17,12 @@
 
 package org.apache.doris.catalog;
 
-import org.apache.doris.nereids.trees.expressions.functions.AggregateFunction;
 import org.apache.doris.nereids.trees.expressions.functions.BoundFunction;
 import org.apache.doris.nereids.trees.expressions.functions.FunctionBuilder;
-import org.apache.doris.nereids.trees.expressions.functions.ScalarFunction;
+import org.apache.doris.nereids.trees.expressions.functions.agg.AggregateFunction;
+import org.apache.doris.nereids.trees.expressions.functions.generator.TableGeneratingFunction;
+import org.apache.doris.nereids.trees.expressions.functions.scalar.ScalarFunction;
+import org.apache.doris.nereids.trees.expressions.functions.table.TableValuedFunction;
 
 import com.google.common.collect.ImmutableList;
 
@@ -76,6 +78,15 @@ public interface FunctionHelper {
         return new AggregateFunc(functionClass, functionNames);
     }
 
+    default TableValuedFunc tableValued(Class<? extends TableValuedFunction> functionClass, String... functionNames) {
+        return new TableValuedFunc(functionClass, functionNames);
+    }
+
+    default TableGeneratingFunc tableGenerating(Class<? extends TableGeneratingFunction> functionClass,
+            String... functionNames) {
+        return new TableGeneratingFunc(functionClass, functionNames);
+    }
+
     /**
      * use this class to prevent the wrong type from being registered, and support multi function names
      * like substring and substr.
@@ -103,6 +114,18 @@ public interface FunctionHelper {
 
     class AggregateFunc extends NamedFunc<AggregateFunction> {
         public AggregateFunc(Class<? extends AggregateFunction> functionClass, String... names) {
+            super(functionClass, names);
+        }
+    }
+
+    class TableValuedFunc extends NamedFunc<TableValuedFunction> {
+        public TableValuedFunc(Class<? extends TableValuedFunction> functionClass, String... names) {
+            super(functionClass, names);
+        }
+    }
+
+    class TableGeneratingFunc extends NamedFunc<TableGeneratingFunction> {
+        public TableGeneratingFunc(Class<? extends TableGeneratingFunction> functionClass, String... names) {
             super(functionClass, names);
         }
     }

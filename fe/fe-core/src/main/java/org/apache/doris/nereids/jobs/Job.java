@@ -17,25 +17,67 @@
 
 package org.apache.doris.nereids.jobs;
 
+import org.apache.doris.nereids.CascadesContext;
+import org.apache.doris.nereids.StatementContext;
 import org.apache.doris.nereids.exceptions.AnalysisException;
+import org.apache.doris.nereids.memo.CopyInResult;
+import org.apache.doris.nereids.memo.Group;
 import org.apache.doris.nereids.memo.GroupExpression;
+import org.apache.doris.nereids.memo.Memo;
+import org.apache.doris.nereids.metrics.CounterType;
+import org.apache.doris.nereids.metrics.EventChannel;
+import org.apache.doris.nereids.metrics.EventProducer;
+import org.apache.doris.nereids.metrics.TracerSupplier;
+import org.apache.doris.nereids.metrics.consumer.LogConsumer;
+import org.apache.doris.nereids.metrics.enhancer.AddCounterEventEnhancer;
+import org.apache.doris.nereids.metrics.event.CounterEvent;
+import org.apache.doris.nereids.metrics.event.TransformEvent;
 import org.apache.doris.nereids.rules.Rule;
 import org.apache.doris.nereids.rules.RuleSet;
+import org.apache.doris.nereids.trees.plans.Plan;
+import org.apache.doris.qe.ConnectContext;
+import org.apache.doris.qe.SessionVariable;
+
+import com.google.common.base.Preconditions;
+import com.google.common.collect.ImmutableSet;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 import java.util.List;
+import java.util.Locale;
 import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
 /**
  * Abstract class for all job using for analyze and optimize query plan in Nereids.
  */
-public abstract class Job {
+public abstract class Job implements TracerSupplier {
+    // counter tracer to count expression transform times.
+    protected static final EventProducer COUNTER_TRACER = new EventProducer(CounterEvent.class,
+            EventChannel.getDefaultChannel()
+                    .addEnhancers(new AddCounterEventEnhancer())
+                    .addConsumers(new LogConsumer(CounterEvent.class, EventChannel.LOG)));
+    public final Logger logger = LogManager.getLogger(getClass());
+
     protected JobType type;
     protected JobContext context;
+    protected boolean once;
+    protected final Set<String> disableRules;
 
     public Job(JobType type, JobContext context) {
+        this(type, context, true);
+    }
+
+    /** job full parameter constructor */
+    public Job(JobType type, JobContext context, boolean once) {
         this.type = type;
         this.context = context;
+        this.once = once;
+        this.disableRules = getAndCacheSessionVariable(context, "disableNereidsRules",
+                ImmutableSet.of(), SessionVariable::getDisableNereidsRules);
     }
 
     public void pushJob(Job job) {
@@ -46,6 +88,10 @@ public abstract class Job {
         return context.getCascadesContext().getRuleSet();
     }
 
+    public boolean isOnce() {
+        return once;
+    }
+
     /**
      * Get the rule set of this job. Filter out already applied rules and rules that are not matched on root node.
      *
@@ -53,12 +99,67 @@ public abstract class Job {
      * @param candidateRules rules to be applied
      * @return all rules that can be applied on this group expression
      */
-    public List<Rule> getValidRules(GroupExpression groupExpression,
-            List<Rule> candidateRules) {
+    public List<Rule> getValidRules(GroupExpression groupExpression, List<Rule> candidateRules) {
         return candidateRules.stream()
+                .filter(rule -> !disableRules.contains(rule.getRuleType().name().toUpperCase(Locale.ROOT)))
                 .filter(rule -> Objects.nonNull(rule) && rule.getPattern().matchRoot(groupExpression.getPlan())
                         && groupExpression.notApplied(rule)).collect(Collectors.toList());
     }
 
     public abstract void execute() throws AnalysisException;
+
+    public EventProducer getEventTracer() {
+        throw new UnsupportedOperationException("get_event_tracer is unsupported");
+    }
+
+    protected Optional<CopyInResult> invokeRewriteRuleWithTrace(Rule rule, Plan before, Group targetGroup) {
+        context.onInvokeRule(rule.getRuleType());
+        COUNTER_TRACER.log(CounterEvent.of(Memo.getStateId(),
+                CounterType.EXPRESSION_TRANSFORM, targetGroup, targetGroup.getLogicalExpression(), before));
+
+        List<Plan> afters = rule.transform(before, context.getCascadesContext());
+        Preconditions.checkArgument(afters.size() == 1);
+        Plan after = afters.get(0);
+        if (after == before) {
+            return Optional.empty();
+        }
+
+        CopyInResult result = context.getCascadesContext()
+                .getMemo()
+                .copyIn(after, targetGroup, rule.isRewrite());
+
+        if (result.generateNewExpression || result.correspondingExpression.getOwnerGroup() != targetGroup) {
+            getEventTracer().log(TransformEvent.of(targetGroup.getLogicalExpression(), before, afters,
+                            rule.getRuleType()), rule::isRewrite);
+        }
+
+        return Optional.of(result);
+    }
+
+    /**
+     * count the job execution times of groupExpressions, all groupExpressions will be inclusive.
+     * TODO: count a specific groupExpression.
+     * @param groupExpression the groupExpression at current job.
+     */
+    protected void countJobExecutionTimesOfGroupExpressions(GroupExpression groupExpression) {
+        COUNTER_TRACER.log(CounterEvent.of(Memo.getStateId(), CounterType.JOB_EXECUTION,
+                groupExpression.getOwnerGroup(), groupExpression, groupExpression.getPlan()));
+    }
+
+    private <T> T getAndCacheSessionVariable(JobContext context, String cacheName,
+            T defaultValue, Function<SessionVariable, T> variableSupplier) {
+        CascadesContext cascadesContext = context.getCascadesContext();
+        ConnectContext connectContext = cascadesContext.getConnectContext();
+        if (connectContext == null) {
+            return defaultValue;
+        }
+
+        StatementContext statementContext = cascadesContext.getStatementContext();
+        if (statementContext == null) {
+            return defaultValue;
+        }
+        T cacheResult = statementContext.getOrRegisterCache(cacheName,
+                () -> variableSupplier.apply(connectContext.getSessionVariable()));
+        return cacheResult;
+    }
 }

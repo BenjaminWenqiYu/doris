@@ -16,6 +16,14 @@
 1
 1
 
+-- !distinct_count_group_by_distributed_key --
+1303	1
+1309	1
+1312	1
+
 -- !avg --
-2.5E-323	1.1644193E-317
+5.0	2356811.0
+
+-- !string_arithmetic --
+3.0	-1.0
 

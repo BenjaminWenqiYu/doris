@@ -20,11 +20,13 @@ package org.apache.doris.mysql;
 import org.apache.doris.analysis.UserIdentity;
 import org.apache.doris.catalog.Env;
 import org.apache.doris.cluster.ClusterNamespace;
+import org.apache.doris.common.AuthenticationException;
 import org.apache.doris.common.Config;
 import org.apache.doris.common.DdlException;
 import org.apache.doris.common.ErrorCode;
 import org.apache.doris.common.ErrorReport;
 import org.apache.doris.common.LdapConfig;
+import org.apache.doris.datasource.CatalogIf;
 import org.apache.doris.ldap.LdapAuthenticate;
 import org.apache.doris.mysql.privilege.PaloAuth;
 import org.apache.doris.mysql.privilege.UserResource;
@@ -49,13 +51,14 @@ public class MysqlProto {
     // user_name#HIGH@cluster_name
     private static boolean authenticate(ConnectContext context, byte[] scramble,
             byte[] randomString, String qualifiedUser) {
-        String usePasswd = scramble.length == 0 ? "NO" : "YES";
         String remoteIp = context.getMysqlChannel().getRemoteIp();
-
         List<UserIdentity> currentUserIdentity = Lists.newArrayList();
-        if (!Env.getCurrentEnv().getAuth().checkPassword(qualifiedUser, remoteIp,
-                scramble, randomString, currentUserIdentity)) {
-            ErrorReport.report(ErrorCode.ERR_ACCESS_DENIED_ERROR, qualifiedUser, usePasswd);
+
+        try {
+            Env.getCurrentEnv().getAuth().checkPassword(qualifiedUser, remoteIp,
+                    scramble, randomString, currentUserIdentity);
+        } catch (AuthenticationException e) {
+            ErrorReport.report(e.errorCode, e.msgs);
             return false;
         }
 
@@ -274,8 +277,36 @@ public class MysqlProto {
         // set database
         String db = authPacket.getDb();
         if (!Strings.isNullOrEmpty(db)) {
+            String catalogName = null;
+            String dbName = null;
+            String[] dbNames = db.split("\\.");
+            if (dbNames.length == 1) {
+                dbName = db;
+            } else if (dbNames.length == 2) {
+                catalogName = dbNames[0];
+                dbName = dbNames[1];
+            } else if (dbNames.length > 2) {
+                context.getState().setError(ErrorCode.ERR_BAD_DB_ERROR, "Only one dot can be in the name: " + db);
+                return false;
+            }
+            String dbFullName = ClusterNamespace.getFullName(context.getClusterName(), dbName);
+
+            // check catalog and db exists
+            if (catalogName != null) {
+                CatalogIf catalogIf = context.getEnv().getCatalogMgr().getCatalogNullable(catalogName);
+                if (catalogIf == null) {
+                    context.getState().setError(ErrorCode.ERR_BAD_DB_ERROR, "No match catalog in doris: " + db);
+                    return false;
+                }
+                if (catalogIf.getDbNullable(dbName) == null) {
+                    context.getState().setError(ErrorCode.ERR_BAD_DB_ERROR, "No match database in doris: " + db);
+                    return false;
+                }
+            }
             try {
-                String dbFullName = ClusterNamespace.getFullName(context.getClusterName(), db);
+                if (catalogName != null) {
+                    context.getEnv().changeCatalog(context, catalogName);
+                }
                 Env.getCurrentEnv().changeDb(context, dbFullName);
             } catch (DdlException e) {
                 context.getState().setError(e.getMysqlErrorCode(), e.getMessage());

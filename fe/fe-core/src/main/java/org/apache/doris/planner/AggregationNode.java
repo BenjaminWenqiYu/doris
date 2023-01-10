@@ -42,6 +42,7 @@ import com.google.common.base.MoreObjects;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -190,7 +191,7 @@ public class AggregationNode extends PlanNode {
         }
 
         StatsRecursiveDerive.getStatsRecursiveDerive().statsRecursiveDerive(this);
-        cardinality = statsDeriveResult.getRowCount();
+        cardinality = (long) statsDeriveResult.getRowCount();
     }
 
     @Override
@@ -294,24 +295,34 @@ public class AggregationNode extends PlanNode {
         StringBuilder output = new StringBuilder();
         String nameDetail = getDisplayLabelDetail();
         if (nameDetail != null) {
-            output.append(detailPrefix + nameDetail + "\n");
+            output.append(detailPrefix).append(nameDetail).append("\n");
         }
 
         if (detailLevel == TExplainLevel.BRIEF) {
+            output.append(detailPrefix).append(String.format(
+                    "cardinality=%,d",  cardinality)).append("\n");
             return output.toString();
         }
 
         if (aggInfo.getAggregateExprs() != null && aggInfo.getMaterializedAggregateExprs().size() > 0) {
-            output.append(detailPrefix + "output: ").append(
-                    getExplainString(aggInfo.getMaterializedAggregateExprs()) + "\n");
+            List<String> labels = aggInfo.getMaterializedAggregateExprLabels();
+            if (labels.isEmpty()) {
+                output.append(detailPrefix).append("output: ")
+                        .append(getExplainString(aggInfo.getMaterializedAggregateExprs())).append("\n");
+            } else {
+                output.append(detailPrefix).append("output: ")
+                        .append(StringUtils.join(labels, ", ")).append("\n");
+            }
         }
         // TODO: group by can be very long. Break it into multiple lines
-        output.append(detailPrefix + "group by: ").append(getExplainString(aggInfo.getGroupingExprs()) + "\n");
+        output.append(detailPrefix).append("group by: ")
+                .append(getExplainString(aggInfo.getGroupingExprs()))
+                .append("\n");
         if (!conjuncts.isEmpty()) {
-            output.append(detailPrefix + "having: ").append(getExplainString(conjuncts) + "\n");
+            output.append(detailPrefix).append("having: ").append(getExplainString(conjuncts)).append("\n");
         }
         output.append(detailPrefix).append(String.format(
-                "cardinality=%s", cardinality)).append("\n");
+                "cardinality=%,d", cardinality)).append("\n");
         return output.toString();
     }
 

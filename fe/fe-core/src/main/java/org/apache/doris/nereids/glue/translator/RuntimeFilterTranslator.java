@@ -60,9 +60,8 @@ public class RuntimeFilterTranslator {
      * @param ctx plan translator context
      */
     public void translateRuntimeFilterTarget(Slot slot, OlapScanNode node, PlanTranslatorContext ctx) {
-        context.setKVInNormalMap(context.getExprIdToOlapScanNodeSlotRef(),
-                slot.getExprId(), ctx.findSlotRef(slot.getExprId()));
-        context.setKVInNormalMap(context.getScanNodeOfLegacyRuntimeFilterTarget(), slot, node);
+        context.getExprIdToOlapScanNodeSlotRef().put(slot.getExprId(), ctx.findSlotRef(slot.getExprId()));
+        context.getScanNodeOfLegacyRuntimeFilterTarget().put(slot, node);
     }
 
     /**
@@ -74,6 +73,10 @@ public class RuntimeFilterTranslator {
     public void createLegacyRuntimeFilter(RuntimeFilter filter, HashJoinNode node, PlanTranslatorContext ctx) {
         SlotRef src = ctx.findSlotRef(filter.getSrcExpr().getExprId());
         SlotRef target = context.getExprIdToOlapScanNodeSlotRef().get(filter.getTargetExpr().getExprId());
+        if (target == null) {
+            context.setTargetNullCount();
+            return;
+        }
         org.apache.doris.planner.RuntimeFilter origFilter
                 = org.apache.doris.planner.RuntimeFilter.fromNereidsRuntimeFilter(
                 filter.getId(), node, src, filter.getExprOrder(), target,

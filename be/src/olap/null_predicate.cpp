@@ -32,46 +32,6 @@ PredicateType NullPredicate::type() const {
     return _is_null ? PredicateType::IS_NULL : PredicateType::IS_NOT_NULL;
 }
 
-void NullPredicate::evaluate(ColumnBlock* block, uint16_t* sel, uint16_t* size) const {
-    uint16_t new_size = 0;
-    if (!block->is_nullable() && _is_null) {
-        *size = 0;
-        return;
-    }
-    for (uint16_t i = 0; i < *size; ++i) {
-        uint16_t idx = sel[i];
-        sel[new_size] = idx;
-        new_size += (block->cell(idx).is_null() == _is_null);
-    }
-    *size = new_size;
-}
-
-void NullPredicate::evaluate_or(ColumnBlock* block, uint16_t* sel, uint16_t size,
-                                bool* flags) const {
-    if (!block->is_nullable() && _is_null) {
-        memset(flags, true, size);
-    } else {
-        for (uint16_t i = 0; i < size; ++i) {
-            if (flags[i]) continue;
-            uint16_t idx = sel[i];
-            flags[i] |= (block->cell(idx).is_null() == _is_null);
-        }
-    }
-}
-
-void NullPredicate::evaluate_and(ColumnBlock* block, uint16_t* sel, uint16_t size,
-                                 bool* flags) const {
-    if (!block->is_nullable() && _is_null) {
-        return;
-    } else {
-        for (uint16_t i = 0; i < size; ++i) {
-            if (!flags[i]) continue;
-            uint16_t idx = sel[i];
-            flags[i] &= (block->cell(idx).is_null() == _is_null);
-        }
-    }
-}
-
 Status NullPredicate::evaluate(BitmapIndexIterator* iterator, uint32_t num_rows,
                                roaring::Roaring* roaring) const {
     if (iterator != nullptr) {
@@ -90,6 +50,9 @@ uint16_t NullPredicate::evaluate(const vectorized::IColumn& column, uint16_t* se
                                  uint16_t size) const {
     uint16_t new_size = 0;
     if (auto* nullable = check_and_get_column<ColumnNullable>(column)) {
+        if (!nullable->has_null()) {
+            return _is_null ? 0 : size;
+        }
         auto& null_map = nullable->get_null_map_data();
         for (uint16_t i = 0; i < size; ++i) {
             uint16_t idx = sel[i];
@@ -106,11 +69,17 @@ uint16_t NullPredicate::evaluate(const vectorized::IColumn& column, uint16_t* se
 void NullPredicate::evaluate_or(const IColumn& column, const uint16_t* sel, uint16_t size,
                                 bool* flags) const {
     if (auto* nullable = check_and_get_column<ColumnNullable>(column)) {
-        auto& null_map = nullable->get_null_map_data();
-        for (uint16_t i = 0; i < size; ++i) {
-            if (flags[i]) continue;
-            uint16_t idx = sel[i];
-            flags[i] |= (null_map[idx] == _is_null);
+        if (!nullable->has_null()) {
+            if (!_is_null) {
+                memset(flags, true, size);
+            }
+        } else {
+            auto& null_map = nullable->get_null_map_data();
+            for (uint16_t i = 0; i < size; ++i) {
+                if (flags[i]) continue;
+                uint16_t idx = sel[i];
+                flags[i] |= (null_map[idx] == _is_null);
+            }
         }
     } else {
         if (!_is_null) memset(flags, true, size);
@@ -120,11 +89,17 @@ void NullPredicate::evaluate_or(const IColumn& column, const uint16_t* sel, uint
 void NullPredicate::evaluate_and(const IColumn& column, const uint16_t* sel, uint16_t size,
                                  bool* flags) const {
     if (auto* nullable = check_and_get_column<ColumnNullable>(column)) {
-        auto& null_map = nullable->get_null_map_data();
-        for (uint16_t i = 0; i < size; ++i) {
-            if (flags[i]) continue;
-            uint16_t idx = sel[i];
-            flags[i] &= (null_map[idx] == _is_null);
+        if (!nullable->has_null()) {
+            if (_is_null) {
+                memset(flags, false, size);
+            }
+        } else {
+            auto& null_map = nullable->get_null_map_data();
+            for (uint16_t i = 0; i < size; ++i) {
+                if (flags[i]) continue;
+                uint16_t idx = sel[i];
+                flags[i] &= (null_map[idx] == _is_null);
+            }
         }
     } else {
         if (_is_null) memset(flags, false, size);
@@ -134,6 +109,9 @@ void NullPredicate::evaluate_and(const IColumn& column, const uint16_t* sel, uin
 void NullPredicate::evaluate_vec(const vectorized::IColumn& column, uint16_t size,
                                  bool* flags) const {
     if (auto* nullable = check_and_get_column<ColumnNullable>(column)) {
+        if (!nullable->has_null()) {
+            memset(flags, !_is_null, size);
+        }
         auto& null_map = nullable->get_null_map_data();
         for (uint16_t i = 0; i < size; ++i) {
             flags[i] = (null_map[i] == _is_null);

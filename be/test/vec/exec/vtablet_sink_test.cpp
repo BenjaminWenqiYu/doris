@@ -28,11 +28,11 @@
 #include "runtime/decimalv2_value.h"
 #include "runtime/descriptor_helper.h"
 #include "runtime/exec_env.h"
-#include "runtime/memory/mem_tracker_task_pool.h"
 #include "runtime/result_queue_mgr.h"
 #include "runtime/runtime_state.h"
 #include "runtime/stream_load/load_stream_mgr.h"
 #include "runtime/thread_resource_mgr.h"
+#include "runtime/tuple_row.h"
 #include "runtime/types.h"
 #include "service/brpc.h"
 #include "util/brpc_client_cache.h"
@@ -44,51 +44,229 @@ namespace doris {
 
 namespace stream_load {
 
-extern Status k_add_batch_status;
+Status k_add_batch_status;
 
-class VOlapTableSinkTest : public testing::Test {
-public:
-    VOlapTableSinkTest() {}
-    virtual ~VOlapTableSinkTest() {}
-    void SetUp() override {
-        k_add_batch_status = Status::OK();
-        _env = ExecEnv::GetInstance();
-        _env->_thread_mgr = new ThreadResourceMgr();
-        _env->_master_info = new TMasterInfo();
-        _env->_load_stream_mgr = new LoadStreamMgr();
-        _env->_internal_client_cache = new BrpcClientCache<PBackendService_Stub>();
-        _env->_function_client_cache = new BrpcClientCache<PFunctionService_Stub>();
-        _env->_task_pool_mem_tracker_registry = new MemTrackerTaskPool();
-        ThreadPoolBuilder("SendBatchThreadPool")
-                .set_min_threads(1)
-                .set_max_threads(5)
-                .set_max_queue_size(100)
-                .build(&_env->_send_batch_thread_pool);
-        config::tablet_writer_open_rpc_timeout_sec = 60;
-        config::max_send_batch_parallelism_per_job = 1;
-    }
+TDataSink get_data_sink(TDescriptorTable* desc_tbl) {
+    int64_t db_id = 1;
+    int64_t table_id = 2;
+    int64_t partition_id = 3;
+    int64_t index1_id = 4;
+    int64_t tablet1_id = 6;
+    int64_t tablet2_id = 7;
 
-    void TearDown() override {
-        SAFE_DELETE(_env->_internal_client_cache);
-        SAFE_DELETE(_env->_function_client_cache);
-        SAFE_DELETE(_env->_load_stream_mgr);
-        SAFE_DELETE(_env->_master_info);
-        SAFE_DELETE(_env->_thread_mgr);
-        SAFE_DELETE(_env->_task_pool_mem_tracker_registry);
-        if (_server) {
-            _server->Stop(100);
-            _server->Join();
-            SAFE_DELETE(_server);
+    TDataSink data_sink;
+    data_sink.type = TDataSinkType::OLAP_TABLE_SINK;
+    data_sink.__isset.olap_table_sink = true;
+
+    TOlapTableSink& tsink = data_sink.olap_table_sink;
+    tsink.load_id.hi = 123;
+    tsink.load_id.lo = 456;
+    tsink.txn_id = 789;
+    tsink.db_id = 1;
+    tsink.table_id = 2;
+    tsink.tuple_id = 0;
+    tsink.num_replicas = 3;
+    tsink.db_name = "testDb";
+    tsink.table_name = "testTable";
+
+    // construct schema
+    TOlapTableSchemaParam& tschema = tsink.schema;
+    tschema.db_id = 1;
+    tschema.table_id = 2;
+    tschema.version = 0;
+
+    // descriptor
+    {
+        TDescriptorTableBuilder dtb;
+        {
+            TTupleDescriptorBuilder tuple_builder;
+
+            tuple_builder.add_slot(TSlotDescriptorBuilder()
+                                           .type(TYPE_INT)
+                                           .column_name("c1")
+                                           .column_pos(1)
+                                           .build());
+            tuple_builder.add_slot(TSlotDescriptorBuilder()
+                                           .type(TYPE_BIGINT)
+                                           .column_name("c2")
+                                           .column_pos(2)
+                                           .build());
+            tuple_builder.add_slot(TSlotDescriptorBuilder()
+                                           .string_type(10)
+                                           .column_name("c3")
+                                           .column_pos(3)
+                                           .build());
+
+            tuple_builder.build(&dtb);
         }
+        {
+            TTupleDescriptorBuilder tuple_builder;
+
+            tuple_builder.add_slot(TSlotDescriptorBuilder()
+                                           .type(TYPE_INT)
+                                           .column_name("c1")
+                                           .column_pos(1)
+                                           .build());
+            tuple_builder.add_slot(TSlotDescriptorBuilder()
+                                           .type(TYPE_BIGINT)
+                                           .column_name("c2")
+                                           .column_pos(2)
+                                           .build());
+            tuple_builder.add_slot(TSlotDescriptorBuilder()
+                                           .string_type(20)
+                                           .column_name("c3")
+                                           .column_pos(3)
+                                           .build());
+
+            tuple_builder.build(&dtb);
+        }
+
+        *desc_tbl = dtb.desc_tbl();
+        tschema.slot_descs = desc_tbl->slotDescriptors;
+        tschema.tuple_desc = desc_tbl->tupleDescriptors[0];
     }
+    // index
+    tschema.indexes.resize(1);
+    tschema.indexes[0].id = index1_id;
+    tschema.indexes[0].columns = {"c1", "c2", "c3"};
+    // tschema.indexes[1].id = 5;
+    // tschema.indexes[1].columns = {"c1", "c3"};
+    // partition
+    TOlapTablePartitionParam& tpartition = tsink.partition;
+    tpartition.db_id = db_id;
+    tpartition.table_id = table_id;
+    tpartition.version = table_id;
+    tpartition.__set_partition_column("c2");
+    tpartition.__set_distributed_columns({"c1", "c3"});
+    tpartition.partitions.resize(1);
+    tpartition.partitions[0].id = partition_id;
+    tpartition.partitions[0].num_buckets = 2;
+    tpartition.partitions[0].indexes.resize(1);
+    tpartition.partitions[0].indexes[0].index_id = index1_id;
+    tpartition.partitions[0].indexes[0].tablets = {tablet1_id, tablet2_id};
+    // location
+    TOlapTableLocationParam& location = tsink.location;
+    location.db_id = db_id;
+    location.table_id = table_id;
+    location.version = 0;
+    location.tablets.resize(2);
+    location.tablets[0].tablet_id = tablet1_id;
+    location.tablets[0].node_ids = {0, 1, 2};
+    location.tablets[1].tablet_id = tablet2_id;
+    location.tablets[1].node_ids = {0, 1, 2};
+    // location
+    TPaloNodesInfo& nodes_info = tsink.nodes_info;
+    nodes_info.nodes.resize(3);
+    nodes_info.nodes[0].id = 0;
+    nodes_info.nodes[0].host = "127.0.0.1";
+    nodes_info.nodes[0].async_internal_port = 4356;
+    nodes_info.nodes[1].id = 1;
+    nodes_info.nodes[1].host = "127.0.0.1";
+    nodes_info.nodes[1].async_internal_port = 4356;
+    nodes_info.nodes[2].id = 2;
+    nodes_info.nodes[2].host = "127.0.0.1";
+    nodes_info.nodes[2].async_internal_port = 4357;
 
-private:
-    ExecEnv* _env = nullptr;
-    brpc::Server* _server = nullptr;
-};
+    return data_sink;
+}
 
-TDataSink get_data_sink(TDescriptorTable* desc_tbl);
-TDataSink get_decimal_sink(TDescriptorTable* desc_tbl);
+TDataSink get_decimal_sink(TDescriptorTable* desc_tbl) {
+    int64_t db_id = 1;
+    int64_t table_id = 2;
+    int64_t partition_id = 3;
+    int64_t index1_id = 4;
+    int64_t tablet1_id = 6;
+    int64_t tablet2_id = 7;
+
+    TDataSink data_sink;
+    data_sink.type = TDataSinkType::OLAP_TABLE_SINK;
+    data_sink.__isset.olap_table_sink = true;
+
+    TOlapTableSink& tsink = data_sink.olap_table_sink;
+    tsink.load_id.hi = 123;
+    tsink.load_id.lo = 456;
+    tsink.txn_id = 789;
+    tsink.db_id = 1;
+    tsink.table_id = 2;
+    tsink.tuple_id = 0;
+    tsink.num_replicas = 3;
+    tsink.db_name = "testDb";
+    tsink.table_name = "testTable";
+
+    // construct schema
+    TOlapTableSchemaParam& tschema = tsink.schema;
+    tschema.db_id = 1;
+    tschema.table_id = 2;
+    tschema.version = 0;
+
+    // descriptor
+    {
+        TDescriptorTableBuilder dtb;
+        {
+            TTupleDescriptorBuilder tuple_builder;
+
+            tuple_builder.add_slot(TSlotDescriptorBuilder()
+                                           .type(TYPE_INT)
+                                           .column_name("c1")
+                                           .column_pos(1)
+                                           .build());
+            tuple_builder.add_slot(TSlotDescriptorBuilder()
+                                           .decimal_type(5, 2)
+                                           .column_name("c2")
+                                           .column_pos(2)
+                                           .build());
+
+            tuple_builder.build(&dtb);
+        }
+
+        *desc_tbl = dtb.desc_tbl();
+        tschema.slot_descs = desc_tbl->slotDescriptors;
+        tschema.tuple_desc = desc_tbl->tupleDescriptors[0];
+    }
+    // index
+    tschema.indexes.resize(1);
+    tschema.indexes[0].id = index1_id;
+    tschema.indexes[0].columns = {"c1", "c2"};
+    // tschema.indexes[1].id = 5;
+    // tschema.indexes[1].columns = {"c1", "c3"};
+    // partition
+    TOlapTablePartitionParam& tpartition = tsink.partition;
+    tpartition.db_id = db_id;
+    tpartition.table_id = table_id;
+    tpartition.version = table_id;
+    tpartition.__set_partition_column("c1");
+    tpartition.__set_distributed_columns({"c2"});
+    tpartition.partitions.resize(1);
+    tpartition.partitions[0].id = partition_id;
+    tpartition.partitions[0].num_buckets = 2;
+    tpartition.partitions[0].indexes.resize(1);
+    tpartition.partitions[0].indexes[0].index_id = index1_id;
+    tpartition.partitions[0].indexes[0].tablets = {tablet1_id, tablet2_id};
+    // location
+    TOlapTableLocationParam& location = tsink.location;
+    location.db_id = db_id;
+    location.table_id = table_id;
+    location.version = 0;
+    location.tablets.resize(2);
+    location.tablets[0].tablet_id = tablet1_id;
+    location.tablets[0].node_ids = {0, 1, 2};
+    location.tablets[1].tablet_id = tablet2_id;
+    location.tablets[1].node_ids = {0, 1, 2};
+    // location
+    TPaloNodesInfo& nodes_info = tsink.nodes_info;
+    nodes_info.nodes.resize(3);
+    nodes_info.nodes[0].id = 0;
+    nodes_info.nodes[0].host = "127.0.0.1";
+    nodes_info.nodes[0].async_internal_port = 4356;
+    nodes_info.nodes[1].id = 1;
+    nodes_info.nodes[1].host = "127.0.0.1";
+    nodes_info.nodes[1].async_internal_port = 4356;
+    nodes_info.nodes[2].id = 2;
+    nodes_info.nodes[2].host = "127.0.0.1";
+    nodes_info.nodes[2].async_internal_port = 4357;
+
+    return data_sink;
+}
 
 class VTestInternalService : public PBackendService {
 public:
@@ -160,107 +338,155 @@ public:
     std::set<std::string>* _output_set = nullptr;
 };
 
+class VOlapTableSinkTest : public testing::Test {
+public:
+    VOlapTableSinkTest() {}
+    virtual ~VOlapTableSinkTest() {}
+    void SetUp() override {
+        k_add_batch_status = Status::OK();
+        _env = ExecEnv::GetInstance();
+        _env->_thread_mgr = new ThreadResourceMgr();
+        _env->_master_info = new TMasterInfo();
+        _env->_load_stream_mgr = new LoadStreamMgr();
+        _env->_internal_client_cache = new BrpcClientCache<PBackendService_Stub>();
+        _env->_function_client_cache = new BrpcClientCache<PFunctionService_Stub>();
+        ThreadPoolBuilder("SendBatchThreadPool")
+                .set_min_threads(1)
+                .set_max_threads(5)
+                .set_max_queue_size(100)
+                .build(&_env->_send_batch_thread_pool);
+        config::tablet_writer_open_rpc_timeout_sec = 60;
+        config::max_send_batch_parallelism_per_job = 1;
+    }
+
+    void TearDown() override {
+        SAFE_DELETE(_env->_internal_client_cache);
+        SAFE_DELETE(_env->_function_client_cache);
+        SAFE_DELETE(_env->_load_stream_mgr);
+        SAFE_DELETE(_env->_master_info);
+        SAFE_DELETE(_env->_thread_mgr);
+        if (_server) {
+            _server->Stop(100);
+            _server->Join();
+            SAFE_DELETE(_server);
+        }
+    }
+
+    void test_normal(int be_exec_version) {
+        // start brpc service first
+        _server = new brpc::Server();
+        auto service = new VTestInternalService();
+        ASSERT_EQ(_server->AddService(service, brpc::SERVER_OWNS_SERVICE), 0);
+        brpc::ServerOptions options;
+        {
+            debug::ScopedLeakCheckDisabler disable_lsan;
+            _server->Start(4356, &options);
+        }
+
+        TUniqueId fragment_id;
+        TQueryOptions query_options;
+        query_options.batch_size = 1;
+        query_options.be_exec_version = be_exec_version;
+        RuntimeState state(fragment_id, query_options, TQueryGlobals(), _env);
+        state.init_mem_trackers(TUniqueId());
+
+        ObjectPool obj_pool;
+        TDescriptorTable tdesc_tbl;
+        auto t_data_sink = get_data_sink(&tdesc_tbl);
+
+        // crate desc_tabl
+        DescriptorTbl* desc_tbl = nullptr;
+        auto st = DescriptorTbl::create(&obj_pool, tdesc_tbl, &desc_tbl);
+        ASSERT_TRUE(st.ok());
+        state._desc_tbl = desc_tbl;
+
+        TupleDescriptor* tuple_desc = desc_tbl->get_tuple_descriptor(0);
+        LOG(INFO) << "tuple_desc=" << tuple_desc->debug_string();
+
+        RowDescriptor row_desc(*desc_tbl, {0}, {false});
+        service->_row_desc = &row_desc;
+        std::set<std::string> output_set;
+        service->_output_set = &output_set;
+
+        VOlapTableSink sink(&obj_pool, row_desc, {}, &st);
+        ASSERT_TRUE(st.ok());
+
+        // init
+        st = sink.init(t_data_sink);
+        ASSERT_TRUE(st.ok());
+        // prepare
+        st = sink.prepare(&state);
+        ASSERT_TRUE(st.ok());
+        // open
+        st = sink.open(&state);
+        ASSERT_TRUE(st.ok());
+
+        int slot_count = tuple_desc->slots().size();
+        std::vector<vectorized::MutableColumnPtr> columns(slot_count);
+        for (int i = 0; i < slot_count; i++) {
+            columns[i] = tuple_desc->slots()[i]->get_empty_mutable_column();
+        }
+
+        int col_idx = 0;
+        auto* column_ptr = columns[col_idx++].get();
+        auto column_vector_int = column_ptr;
+        int int_val = 12;
+        column_vector_int->insert_data((const char*)&int_val, 0);
+        int_val = 13;
+        column_vector_int->insert_data((const char*)&int_val, 0);
+        int_val = 14;
+        column_vector_int->insert_data((const char*)&int_val, 0);
+
+        column_ptr = columns[col_idx++].get();
+        auto column_vector_bigint = column_ptr;
+        int64_t int64_val = 9;
+        column_vector_bigint->insert_data((const char*)&int64_val, 0);
+        int64_val = 25;
+        column_vector_bigint->insert_data((const char*)&int64_val, 0);
+        int64_val = 50;
+        column_vector_bigint->insert_data((const char*)&int64_val, 0);
+
+        column_ptr = columns[col_idx++].get();
+        auto column_vector_str = column_ptr;
+        column_vector_str->insert_data("abc", 3);
+        column_vector_str->insert_data("abcd", 4);
+        column_vector_str->insert_data("abcde1234567890", 15);
+
+        vectorized::Block block;
+        col_idx = 0;
+        for (const auto slot_desc : tuple_desc->slots()) {
+            block.insert(vectorized::ColumnWithTypeAndName(std::move(columns[col_idx++]),
+                                                           slot_desc->get_data_type_ptr(),
+                                                           slot_desc->col_name()));
+        }
+
+        // send
+        st = sink.send(&state, &block);
+        ASSERT_TRUE(st.ok());
+        // close
+        st = sink.close(&state, Status::OK());
+        ASSERT_TRUE(st.ok() || st.to_string() == "Internal error: wait close failed. ")
+                << st.to_string();
+
+        // each node has a eof
+        ASSERT_EQ(2, service->_eof_counters);
+        ASSERT_EQ(2 * 2, service->_row_counters);
+
+        // 2node * 2
+        ASSERT_EQ(1, state.num_rows_load_filtered());
+    }
+
+private:
+    ExecEnv* _env = nullptr;
+    brpc::Server* _server = nullptr;
+};
+
 TEST_F(VOlapTableSinkTest, normal) {
-    // start brpc service first
-    _server = new brpc::Server();
-    auto service = new VTestInternalService();
-    ASSERT_EQ(_server->AddService(service, brpc::SERVER_OWNS_SERVICE), 0);
-    brpc::ServerOptions options;
-    {
-        debug::ScopedLeakCheckDisabler disable_lsan;
-        _server->Start(4356, &options);
-    }
+    test_normal(1);
+}
 
-    TUniqueId fragment_id;
-    TQueryOptions query_options;
-    query_options.batch_size = 1;
-    RuntimeState state(fragment_id, query_options, TQueryGlobals(), _env);
-    state.init_mem_trackers(TUniqueId());
-
-    ObjectPool obj_pool;
-    TDescriptorTable tdesc_tbl;
-    auto t_data_sink = get_data_sink(&tdesc_tbl);
-
-    // crate desc_tabl
-    DescriptorTbl* desc_tbl = nullptr;
-    auto st = DescriptorTbl::create(&obj_pool, tdesc_tbl, &desc_tbl);
-    ASSERT_TRUE(st.ok());
-    state._desc_tbl = desc_tbl;
-
-    TupleDescriptor* tuple_desc = desc_tbl->get_tuple_descriptor(0);
-    LOG(INFO) << "tuple_desc=" << tuple_desc->debug_string();
-
-    RowDescriptor row_desc(*desc_tbl, {0}, {false});
-    service->_row_desc = &row_desc;
-    std::set<std::string> output_set;
-    service->_output_set = &output_set;
-
-    VOlapTableSink sink(&obj_pool, row_desc, {}, &st);
-    ASSERT_TRUE(st.ok());
-
-    // init
-    st = sink.init(t_data_sink);
-    ASSERT_TRUE(st.ok());
-    // prepare
-    st = sink.prepare(&state);
-    ASSERT_TRUE(st.ok());
-    // open
-    st = sink.open(&state);
-    ASSERT_TRUE(st.ok());
-
-    int slot_count = tuple_desc->slots().size();
-    std::vector<vectorized::MutableColumnPtr> columns(slot_count);
-    for (int i = 0; i < slot_count; i++) {
-        columns[i] = tuple_desc->slots()[i]->get_empty_mutable_column();
-    }
-
-    int col_idx = 0;
-    auto* column_ptr = columns[col_idx++].get();
-    auto column_vector_int = column_ptr;
-    int int_val = 12;
-    column_vector_int->insert_data((const char*)&int_val, 0);
-    int_val = 13;
-    column_vector_int->insert_data((const char*)&int_val, 0);
-    int_val = 14;
-    column_vector_int->insert_data((const char*)&int_val, 0);
-
-    column_ptr = columns[col_idx++].get();
-    auto column_vector_bigint = column_ptr;
-    int64_t int64_val = 9;
-    column_vector_bigint->insert_data((const char*)&int64_val, 0);
-    int64_val = 25;
-    column_vector_bigint->insert_data((const char*)&int64_val, 0);
-    int64_val = 50;
-    column_vector_bigint->insert_data((const char*)&int64_val, 0);
-
-    column_ptr = columns[col_idx++].get();
-    auto column_vector_str = column_ptr;
-    column_vector_str->insert_data("abc", 3);
-    column_vector_str->insert_data("abcd", 4);
-    column_vector_str->insert_data("abcde1234567890", 15);
-
-    vectorized::Block block;
-    col_idx = 0;
-    for (const auto slot_desc : tuple_desc->slots()) {
-        block.insert(vectorized::ColumnWithTypeAndName(std::move(columns[col_idx++]),
-                                                       slot_desc->get_data_type_ptr(),
-                                                       slot_desc->col_name()));
-    }
-
-    // send
-    st = sink.send(&state, &block);
-    ASSERT_TRUE(st.ok());
-    // close
-    st = sink.close(&state, Status::OK());
-    ASSERT_TRUE(st.ok() || st.to_string() == "Internal error: wait close failed. ")
-            << st.to_string();
-
-    // each node has a eof
-    ASSERT_EQ(2, service->_eof_counters);
-    ASSERT_EQ(2 * 2, service->_row_counters);
-
-    // 2node * 2
-    ASSERT_EQ(1, state.num_rows_load_filtered());
+TEST_F(VOlapTableSinkTest, fallback) {
+    test_normal(0);
 }
 
 TEST_F(VOlapTableSinkTest, convert) {
@@ -277,6 +503,7 @@ TEST_F(VOlapTableSinkTest, convert) {
     TUniqueId fragment_id;
     TQueryOptions query_options;
     query_options.batch_size = 1024;
+    query_options.be_exec_version = 1;
     RuntimeState state(fragment_id, query_options, TQueryGlobals(), _env);
     state.init_mem_trackers(TUniqueId());
 
@@ -406,6 +633,7 @@ TEST_F(VOlapTableSinkTest, add_block_failed) {
     TUniqueId fragment_id;
     TQueryOptions query_options;
     query_options.batch_size = 1;
+    query_options.be_exec_version = 1;
     RuntimeState state(fragment_id, query_options, TQueryGlobals(), _env);
     state.init_mem_trackers(TUniqueId());
 
@@ -519,6 +747,7 @@ TEST_F(VOlapTableSinkTest, decimal) {
     TUniqueId fragment_id;
     TQueryOptions query_options;
     query_options.batch_size = 1;
+    query_options.be_exec_version = 1;
     RuntimeState state(fragment_id, query_options, TQueryGlobals(), _env);
     state.init_mem_trackers(TUniqueId());
 

@@ -25,21 +25,17 @@ import org.apache.doris.nereids.properties.LogicalProperties;
 import org.apache.doris.nereids.trees.expressions.Alias;
 import org.apache.doris.nereids.trees.expressions.Expression;
 import org.apache.doris.nereids.trees.expressions.SlotReference;
-import org.apache.doris.nereids.trees.expressions.functions.AggregateFunction;
-import org.apache.doris.nereids.trees.expressions.functions.Sum;
+import org.apache.doris.nereids.trees.expressions.functions.agg.AggregateFunction;
+import org.apache.doris.nereids.trees.expressions.functions.agg.Sum;
 import org.apache.doris.nereids.trees.plans.Plan;
-import org.apache.doris.nereids.trees.plans.RelationId;
 import org.apache.doris.nereids.trees.plans.logical.LogicalAggregate;
 import org.apache.doris.nereids.trees.plans.logical.LogicalOlapScan;
+import org.apache.doris.nereids.trees.plans.logical.RelationUtil;
 import org.apache.doris.nereids.types.IntegerType;
 import org.apache.doris.nereids.util.MemoTestUtils;
 import org.apache.doris.nereids.util.PlanConstructor;
 import org.apache.doris.qe.ConnectContext;
-import org.apache.doris.statistics.ColumnStats;
-import org.apache.doris.statistics.Statistics;
-import org.apache.doris.statistics.StatisticsManager;
 import org.apache.doris.statistics.StatsDeriveResult;
-import org.apache.doris.statistics.TableStats;
 
 import com.google.common.collect.ImmutableList;
 import mockit.Expectations;
@@ -58,8 +54,6 @@ public class DeriveStatsJobTest {
     ConnectContext context;
     @Mocked
     Env env;
-    @Mocked
-    StatisticsManager statisticsManager;
 
     SlotReference slot1;
 
@@ -79,29 +73,17 @@ public class DeriveStatsJobTest {
     }
 
     private LogicalOlapScan constructOlapSCan() {
-        ColumnStats columnStats1 = new ColumnStats();
-        columnStats1.setNdv(10);
-        columnStats1.setNumNulls(5);
         long tableId1 = 0;
-        TableStats tableStats1 = new TableStats();
-        tableStats1.putColumnStats("c1", columnStats1);
-        Statistics statistics = new Statistics();
-        statistics.putTableStats(tableId1, tableStats1);
+
         List<String> qualifier = ImmutableList.of("test", "t");
         slot1 = new SlotReference("c1", IntegerType.INSTANCE, true, qualifier);
         new Expectations() {{
                 ConnectContext.get();
                 result = context;
-                context.getEnv();
-                result = env;
-                env.getStatisticsManager();
-                result = statisticsManager;
-                statisticsManager.getStatistics();
-                result = statistics;
             }};
 
         OlapTable table1 = PlanConstructor.newOlapTable(tableId1, "t1", 0);
-        return new LogicalOlapScan(RelationId.createGenerator().getNextId(), table1, Collections.emptyList()).withLogicalProperties(
+        return new LogicalOlapScan(RelationUtil.newRelationId(), table1, Collections.emptyList()).withLogicalProperties(
                 Optional.of(new LogicalProperties(() -> ImmutableList.of(slot1))));
     }
 

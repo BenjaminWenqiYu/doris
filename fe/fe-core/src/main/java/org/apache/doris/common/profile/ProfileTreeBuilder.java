@@ -209,7 +209,7 @@ public class ProfileTreeBuilder {
                                                     String instanceId) throws UserException {
         List<Pair<RuntimeProfile, Boolean>> instanceChildren = instanceProfile.getChildList();
         ProfileTreeNode senderNode = null;
-        ProfileTreeNode execNode = null;
+        List<ProfileTreeNode> childrenNodes = Lists.newArrayList();
         for (Pair<RuntimeProfile, Boolean> pair : instanceChildren) {
             RuntimeProfile profile = pair.first;
             if (profile.getName().startsWith(PROFILE_NAME_DATA_STREAM_SENDER)
@@ -227,23 +227,31 @@ public class ProfileTreeBuilder {
                 continue;
             } else {
                 // This should be an ExecNode profile
-                execNode = buildTreeNode(profile, null, fragmentId, instanceId);
+                childrenNodes.add(buildTreeNode(profile, null, fragmentId, instanceId));
             }
         }
-        if (senderNode == null || execNode == null) {
-            // TODO(cmy): This shouldn't happen, but there are sporadic errors. So I add a log to observe this error.
+        if (senderNode == null || childrenNodes.isEmpty()) {
+            // FE will constantly update the total profile after receiving the instance profile reported by BE.
+            // Writing a profile will result in an empty instance profile until all instance profiles are received
+            // at least once.
             // Issue: https://github.com/apache/doris/issues/10095
             StringBuilder sb = new StringBuilder();
             instanceProfile.prettyPrint(sb, "");
-            LOG.warn("Invalid instance profile, sender is null: {}, execNode is null: {}, instance profile: {}",
-                    (senderNode == null), (execNode == null), sb.toString());
+            if (LOG.isDebugEnabled()) {
+                LOG.debug(
+                        "Invalid instance profile, sender is null: {},"
+                        + "childrenNodes is empty: {}, instance profile: {}",
+                        (senderNode == null), childrenNodes.isEmpty(), sb.toString());
+            }
             throw new UserException("Invalid instance profile, without sender or exec node: " + instanceProfile);
         }
-        senderNode.addChild(execNode);
-        execNode.setParentNode(senderNode);
+        for (ProfileTreeNode execNode : childrenNodes) {
+            senderNode.addChild(execNode);
+            execNode.setParentNode(senderNode);
+            execNode.setFragmentAndInstanceId(fragmentId, instanceId);
+        }
 
         senderNode.setFragmentAndInstanceId(fragmentId, instanceId);
-        execNode.setFragmentAndInstanceId(fragmentId, instanceId);
 
         return senderNode;
     }

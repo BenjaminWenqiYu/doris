@@ -68,6 +68,14 @@ Status DataTypeNumberBase<T>::from_string(ReadBuffer& rb, IColumn* column) const
                                            std::string(rb.position(), rb.count()).c_str());
         }
         column_data->insert_value(val);
+    } else if constexpr (std::is_same_v<T, uint8_t>) {
+        // Note: here we should handle the bool type
+        T val = 0;
+        if (!try_read_bool_text(val, rb)) {
+            return Status::InvalidArgument("parse boolean fail, string: '{}'",
+                                           std::string(rb.position(), rb.count()).c_str());
+        }
+        column_data->insert_value(val);
     } else if constexpr (std::is_integral<T>::value) {
         T val = 0;
         if (!read_int_text_impl(val, rb)) {
@@ -92,22 +100,30 @@ std::string DataTypeNumberBase<T>::to_string(const IColumn& column, size_t row_n
         return int128_to_string(
                 assert_cast<const ColumnVector<T>&>(*column.convert_to_full_column_if_const().get())
                         .get_data()[row_num]);
-    } else if constexpr (std::is_integral<T>::value || std::numeric_limits<T>::is_iec559) {
+    } else if constexpr (std::is_integral<T>::value) {
         return std::to_string(
                 assert_cast<const ColumnVector<T>&>(*column.convert_to_full_column_if_const().get())
                         .get_data()[row_num]);
+    } else if constexpr (std::numeric_limits<T>::is_iec559) {
+        fmt::memory_buffer buffer;
+        fmt::format_to(
+                buffer, "{}",
+                assert_cast<const ColumnVector<T>&>(*column.convert_to_full_column_if_const().get())
+                        .get_data()[row_num]);
+        return std::string(buffer.data(), buffer.size());
     }
 }
 
 // binary: row num | value1 | value2 | ...
 template <typename T>
 int64_t DataTypeNumberBase<T>::get_uncompressed_serialized_bytes(const IColumn& column,
-                                                                 int data_version) const {
+                                                                 int be_exec_version) const {
     return sizeof(uint32_t) + column.size() * sizeof(FieldType);
 }
 
 template <typename T>
-char* DataTypeNumberBase<T>::serialize(const IColumn& column, char* buf, int data_version) const {
+char* DataTypeNumberBase<T>::serialize(const IColumn& column, char* buf,
+                                       int be_exec_version) const {
     // row num
     const auto row_num = column.size();
     *reinterpret_cast<uint32_t*>(buf) = row_num;
@@ -123,7 +139,7 @@ char* DataTypeNumberBase<T>::serialize(const IColumn& column, char* buf, int dat
 
 template <typename T>
 const char* DataTypeNumberBase<T>::deserialize(const char* buf, IColumn* column,
-                                               int data_version) const {
+                                               int be_exec_version) const {
     // row num
     uint32_t row_num = *reinterpret_cast<const uint32_t*>(buf);
     buf += sizeof(uint32_t);

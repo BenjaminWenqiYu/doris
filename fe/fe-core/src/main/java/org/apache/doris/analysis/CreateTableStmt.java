@@ -101,47 +101,47 @@ public class CreateTableStmt extends DdlStmt {
     }
 
     public CreateTableStmt(boolean ifNotExists,
-                           boolean isExternal,
-                           TableName tableName,
-                           List<ColumnDef> columnDefinitions,
-                           String engineName,
-                           KeysDesc keysDesc,
-                           PartitionDesc partitionDesc,
-                           DistributionDesc distributionDesc,
-                           Map<String, String> properties,
-                           Map<String, String> extProperties,
-                           String comment) {
+            boolean isExternal,
+            TableName tableName,
+            List<ColumnDef> columnDefinitions,
+            String engineName,
+            KeysDesc keysDesc,
+            PartitionDesc partitionDesc,
+            DistributionDesc distributionDesc,
+            Map<String, String> properties,
+            Map<String, String> extProperties,
+            String comment) {
         this(ifNotExists, isExternal, tableName, columnDefinitions, null, engineName, keysDesc, partitionDesc,
                 distributionDesc, properties, extProperties, comment, null);
     }
 
     public CreateTableStmt(boolean ifNotExists,
-                           boolean isExternal,
-                           TableName tableName,
-                           List<ColumnDef> columnDefinitions,
-                           String engineName,
-                           KeysDesc keysDesc,
-                           PartitionDesc partitionDesc,
-                           DistributionDesc distributionDesc,
-                           Map<String, String> properties,
-                           Map<String, String> extProperties,
-                           String comment, List<AlterClause> ops) {
+            boolean isExternal,
+            TableName tableName,
+            List<ColumnDef> columnDefinitions,
+            String engineName,
+            KeysDesc keysDesc,
+            PartitionDesc partitionDesc,
+            DistributionDesc distributionDesc,
+            Map<String, String> properties,
+            Map<String, String> extProperties,
+            String comment, List<AlterClause> ops) {
         this(ifNotExists, isExternal, tableName, columnDefinitions, null, engineName, keysDesc, partitionDesc,
                 distributionDesc, properties, extProperties, comment, ops);
     }
 
     public CreateTableStmt(boolean ifNotExists,
-                           boolean isExternal,
-                           TableName tableName,
-                           List<ColumnDef> columnDefinitions,
-                           List<IndexDef> indexDefs,
-                           String engineName,
-                           KeysDesc keysDesc,
-                           PartitionDesc partitionDesc,
-                           DistributionDesc distributionDesc,
-                           Map<String, String> properties,
-                           Map<String, String> extProperties,
-                           String comment, List<AlterClause> rollupAlterClauseList) {
+            boolean isExternal,
+            TableName tableName,
+            List<ColumnDef> columnDefinitions,
+            List<IndexDef> indexDefs,
+            String engineName,
+            KeysDesc keysDesc,
+            PartitionDesc partitionDesc,
+            DistributionDesc distributionDesc,
+            Map<String, String> properties,
+            Map<String, String> extProperties,
+            String comment, List<AlterClause> rollupAlterClauseList) {
         this.tableName = tableName;
         if (columnDefinitions == null) {
             this.columnDefs = Lists.newArrayList();
@@ -169,11 +169,11 @@ public class CreateTableStmt extends DdlStmt {
 
     // This is for iceberg/hudi table, which has no column schema
     public CreateTableStmt(boolean ifNotExists,
-                           boolean isExternal,
-                           TableName tableName,
-                           String engineName,
-                           Map<String, String> properties,
-                           String comment) {
+            boolean isExternal,
+            TableName tableName,
+            String engineName,
+            Map<String, String> properties,
+            String comment) {
         this.ifNotExists = ifNotExists;
         this.isExternal = isExternal;
         this.tableName = tableName;
@@ -274,11 +274,6 @@ public class CreateTableStmt extends DdlStmt {
 
         analyzeEngineName();
 
-        // TODO(wyb): spark-load
-        if (engineName.equals("hive") && !Config.enable_spark_load) {
-            throw new AnalysisException("Spark Load from hive table is coming soon");
-        }
-
         // `analyzeUniqueKeyMergeOnWrite` would modify `properties`, which will be used later,
         // so we just clone a properties map here.
         boolean enableUniqueKeyMergeOnWrite = false;
@@ -302,7 +297,8 @@ public class CreateTableStmt extends DdlStmt {
                 if (hasAggregate) {
                     for (ColumnDef columnDef : columnDefs) {
                         if (columnDef.getAggregateType() == null
-                                && !columnDef.getType().isScalarType(PrimitiveType.STRING)) {
+                                && !columnDef.getType().isScalarType(PrimitiveType.STRING)
+                                && !columnDef.getType().isScalarType(PrimitiveType.JSONB)) {
                             keysColumnNames.add(columnDef.getName());
                         }
                     }
@@ -324,17 +320,23 @@ public class CreateTableStmt extends DdlStmt {
                         if (columnDef.getType().getPrimitiveType() == PrimitiveType.STRING) {
                             break;
                         }
+                        if (columnDef.getType().getPrimitiveType() == PrimitiveType.JSONB) {
+                            break;
+                        }
+                        if (columnDef.getType().isCollectionType()) {
+                            break;
+                        }
                         if (columnDef.getType().getPrimitiveType() == PrimitiveType.VARCHAR) {
                             keysColumnNames.add(columnDef.getName());
                             break;
                         }
                         keysColumnNames.add(columnDef.getName());
                     }
-                    // The OLAP table must has at least one short key and the float and double should not be short key.
+                    // The OLAP table must have at least one short key and the float and double should not be short key.
                     // So the float and double could not be the first column in OLAP table.
                     if (keysColumnNames.isEmpty()) {
                         throw new AnalysisException("The olap table first column could not be float, double, string"
-                                + " use decimal or varchar instead.");
+                                + " or array, please use decimal or varchar instead.");
                     }
                     keysDesc = new KeysDesc(KeysType.DUP_KEYS, keysColumnNames);
                 }
@@ -388,10 +390,7 @@ public class CreateTableStmt extends DdlStmt {
         for (ColumnDef columnDef : columnDefs) {
             columnDef.analyze(engineName.equals("olap"));
 
-            if (columnDef.getType().isArrayType()) {
-                if (!Config.enable_array_type) {
-                    throw new AnalysisException("Please open enable_array_type config before use Array.");
-                }
+            if (columnDef.getType().isArrayType() && engineName.equals("olap")) {
                 if (columnDef.getAggregateType() != null && columnDef.getAggregateType() != AggregateType.NONE) {
                     throw new AnalysisException("Array column can't support aggregation "
                             + columnDef.getAggregateType());
@@ -400,6 +399,10 @@ public class CreateTableStmt extends DdlStmt {
                     throw new AnalysisException("Array can only be used in the non-key column of"
                             + " the duplicate table at present.");
                 }
+            }
+
+            if (columnDef.getType().isTime() || columnDef.getType().isTimeV2()) {
+                throw new AnalysisException("Time type is not supported for olap table");
             }
 
             if (columnDef.getType().isObjectStored()) {
@@ -419,7 +422,8 @@ public class CreateTableStmt extends DdlStmt {
         if (engineName.equals("olap")) {
             // analyze partition
             if (partitionDesc != null) {
-                if (partitionDesc instanceof ListPartitionDesc || partitionDesc instanceof RangePartitionDesc) {
+                if (partitionDesc instanceof ListPartitionDesc || partitionDesc instanceof RangePartitionDesc
+                        || partitionDesc instanceof ColumnPartitionDesc) {
                     partitionDesc.analyze(columnDefs, properties);
                 } else {
                     throw new AnalysisException("Currently only support range"
@@ -432,7 +436,7 @@ public class CreateTableStmt extends DdlStmt {
             if (distributionDesc == null) {
                 throw new AnalysisException("Create olap table should contain distribution desc");
             }
-            distributionDesc.analyze(columnSet, columnDefs);
+            distributionDesc.analyze(columnSet, columnDefs, keysDesc);
             if (distributionDesc.type == DistributionInfo.DistributionInfoType.RANDOM) {
                 if (keysDesc.getKeysType() == KeysType.UNIQUE_KEYS) {
                     throw new AnalysisException("Create unique keys table should not contain random distribution desc");
@@ -441,8 +445,9 @@ public class CreateTableStmt extends DdlStmt {
                         if (columnDef.getAggregateType() == AggregateType.REPLACE
                                 || columnDef.getAggregateType() == AggregateType.REPLACE_IF_NOT_NULL) {
                             throw new AnalysisException("Create aggregate keys table with value columns of which"
-                                + " aggregate type is " + columnDef.getAggregateType() + " should not contain random"
-                                + " distribution desc");
+                                    + " aggregate type is " + columnDef.getAggregateType()
+                                    + " should not contain random"
+                                    + " distribution desc");
                         }
                     }
                 }
@@ -489,8 +494,9 @@ public class CreateTableStmt extends DdlStmt {
                                 + indexColName);
                     }
                 }
-                indexes.add(new Index(indexDef.getIndexName(), indexDef.getColumns(), indexDef.getIndexType(),
-                        indexDef.getComment()));
+                indexes.add(new Index(Env.getCurrentEnv().getNextId(), indexDef.getIndexName(),
+                        indexDef.getColumns(), indexDef.getIndexType(),
+                        indexDef.getProperties(), indexDef.getComment()));
                 distinct.add(indexDef.getIndexName());
                 distinctCol.add(indexDef.getColumns().stream().map(String::toUpperCase).collect(Collectors.toList()));
             }
@@ -526,6 +532,13 @@ public class CreateTableStmt extends DdlStmt {
             if (isExternal) {
                 throw new AnalysisException("Do not support external table with engine name = olap");
             }
+        }
+
+        if (Config.disable_iceberg_hudi_table && (engineName.equals("iceberg") || engineName.equals("hudi"))) {
+            throw new AnalysisException(
+                    "iceberg and hudi table is no longer supported. Use multi catalog feature instead."
+                            + ". Or you can temporarily set 'disable_iceberg_hudi_table=false'"
+                            + " in fe.conf to reopen this feature.");
         }
     }
 

@@ -24,8 +24,8 @@
 
 #include "exec/schema_scanner.h"
 #include "io/buffered_reader.h"
-#include "io/file_reader.h"
-#include "io/local_file_reader.h"
+#include "io/fs/local_file_system.h"
+#include "olap/iterators.h"
 #include "runtime/string_value.h"
 #include "util/runtime_profile.h"
 #include "util/timezone_utils.h"
@@ -36,6 +36,7 @@
 #include "vec/exec/format/parquet/vparquet_column_chunk_reader.h"
 #include "vec/exec/format/parquet/vparquet_column_reader.h"
 #include "vec/exec/format/parquet/vparquet_file_metadata.h"
+#include "vec/exec/format/parquet/vparquet_group_reader.h"
 
 namespace doris {
 namespace vectorized {
@@ -46,17 +47,16 @@ public:
 };
 
 TEST_F(ParquetThriftReaderTest, normal) {
-    LocalFileReader reader("./be/test/exec/test_data/parquet_scanner/localfile.parquet", 0);
-
-    auto st = reader.open();
+    io::FileSystemSPtr local_fs = std::make_shared<io::LocalFileSystem>("");
+    io::FileReaderSPtr reader;
+    auto st = local_fs->open_file("./be/test/exec/test_data/parquet_scanner/localfile.parquet",
+                                  &reader, nullptr);
     EXPECT_TRUE(st.ok());
 
-    std::shared_ptr<FileMetaData> metaData;
-    parse_thrift_footer(&reader, metaData);
-    tparquet::FileMetaData t_metadata = metaData->to_thrift_metadata();
+    std::shared_ptr<FileMetaData> meta_data;
+    parse_thrift_footer(reader, meta_data);
+    tparquet::FileMetaData t_metadata = meta_data->to_thrift();
 
-    LOG(WARNING) << "num row groups: " << metaData->num_row_groups();
-    LOG(WARNING) << "num columns: " << metaData->num_columns();
     LOG(WARNING) << "=====================================";
     for (auto value : t_metadata.row_groups) {
         LOG(WARNING) << "row group num_rows: " << value.num_rows;
@@ -78,14 +78,16 @@ TEST_F(ParquetThriftReaderTest, complex_nested_file) {
     //   `hobby` array<map<string,string>>,
     //   `friend` map<string,string>,
     //   `mark` struct<math:int,english:int>)
-    LocalFileReader reader("./be/test/exec/test_data/parquet_scanner/hive-complex.parquet", 0);
 
-    auto st = reader.open();
+    io::FileSystemSPtr local_fs = std::make_shared<io::LocalFileSystem>("");
+    io::FileReaderSPtr reader;
+    auto st = local_fs->open_file("./be/test/exec/test_data/parquet_scanner/hive-complex.parquet",
+                                  &reader, nullptr);
     EXPECT_TRUE(st.ok());
 
-    std::shared_ptr<FileMetaData> metaData;
-    parse_thrift_footer(&reader, metaData);
-    tparquet::FileMetaData t_metadata = metaData->to_thrift_metadata();
+    std::shared_ptr<FileMetaData> metadata;
+    parse_thrift_footer(reader, metadata);
+    tparquet::FileMetaData t_metadata = metadata->to_thrift();
     FieldDescriptor schemaDescriptor;
     schemaDescriptor.parse_from_thrift(t_metadata.schema);
 
@@ -147,7 +149,7 @@ static int fill_nullable_column(ColumnPtr& doris_column, level_t* definitions, s
     return null_cnt;
 }
 
-static Status get_column_values(FileReader* file_reader, tparquet::ColumnChunk* column_chunk,
+static Status get_column_values(io::FileReaderSPtr file_reader, tparquet::ColumnChunk* column_chunk,
                                 FieldSchema* field_schema, ColumnPtr& doris_column,
                                 DataTypePtr& data_type, level_t* definitions) {
     tparquet::ColumnMetaData chunk_meta = column_chunk->meta_data;
@@ -155,7 +157,7 @@ static Status get_column_values(FileReader* file_reader, tparquet::ColumnChunk* 
                                   ? chunk_meta.dictionary_page_offset
                                   : chunk_meta.data_page_offset;
     size_t chunk_size = chunk_meta.total_compressed_size;
-    BufferedFileStreamReader stream_reader(file_reader, start_offset, chunk_size);
+    BufferedFileStreamReader stream_reader(file_reader, start_offset, chunk_size, 1024);
 
     cctz::time_zone ctz;
     TimezoneUtils::find_cctz_time_zone(TimezoneUtils::default_time_zone, ctz);
@@ -173,12 +175,23 @@ static Status get_column_values(FileReader* file_reader, tparquet::ColumnChunk* 
     } else {
         chunk_reader.get_def_levels(definitions, rows);
     }
-    // fill nullable values
-    fill_nullable_column(doris_column, definitions, rows);
+    MutableColumnPtr data_column;
+    if (doris_column->is_nullable()) {
+        // fill nullable values
+        fill_nullable_column(doris_column, definitions, rows);
+        auto* nullable_column = reinterpret_cast<vectorized::ColumnNullable*>(
+                (*std::move(doris_column)).mutate().get());
+        data_column = nullable_column->get_nested_column_ptr();
+    } else {
+        data_column = doris_column->assume_mutable();
+    }
+    ColumnSelectVector run_length_map;
     // decode page data
     if (field_schema->definition_level == 0) {
         // required column
-        return chunk_reader.decode_values(doris_column, data_type, rows);
+        std::vector<u_short> null_map = {(u_short)rows};
+        run_length_map.set_run_length_null_map(null_map, rows, nullptr);
+        return chunk_reader.decode_values(data_column, data_type, run_length_map);
     } else {
         // column with null values
         level_t level_type = definitions[0];
@@ -187,10 +200,12 @@ static Status get_column_values(FileReader* file_reader, tparquet::ColumnChunk* 
             if (definitions[i] != level_type) {
                 if (level_type == 0) {
                     // null values
-                    chunk_reader.insert_null_values(doris_column, num_values);
+                    chunk_reader.insert_null_values(data_column, num_values);
                 } else {
+                    std::vector<u_short> null_map = {(u_short)num_values};
+                    run_length_map.set_run_length_null_map(null_map, rows, nullptr);
                     RETURN_IF_ERROR(
-                            chunk_reader.decode_values(doris_column, data_type, num_values));
+                            chunk_reader.decode_values(data_column, data_type, run_length_map));
                 }
                 level_type = definitions[i];
                 num_values = 1;
@@ -200,9 +215,11 @@ static Status get_column_values(FileReader* file_reader, tparquet::ColumnChunk* 
         }
         if (level_type == 0) {
             // null values
-            chunk_reader.insert_null_values(doris_column, num_values);
+            chunk_reader.insert_null_values(data_column, num_values);
         } else {
-            RETURN_IF_ERROR(chunk_reader.decode_values(doris_column, data_type, num_values));
+            std::vector<u_short> null_map = {(u_short)num_values};
+            run_length_map.set_run_length_null_map(null_map, rows, nullptr);
+            RETURN_IF_ERROR(chunk_reader.decode_values(data_column, data_type, run_length_map));
         }
         return Status::OK();
     }
@@ -266,15 +283,16 @@ static void read_parquet_data_and_check(const std::string& parquet_file,
      * `list_string` array<string>) // 14
      */
 
-    LocalFileReader reader(parquet_file, 0);
-    auto st = reader.open();
+    io::FileSystemSPtr local_fs = std::make_shared<io::LocalFileSystem>("");
+    io::FileReaderSPtr reader;
+    auto st = local_fs->open_file(parquet_file, &reader, nullptr);
     EXPECT_TRUE(st.ok());
 
     std::unique_ptr<vectorized::Block> block;
     create_block(block);
-    std::shared_ptr<FileMetaData> metaData;
-    parse_thrift_footer(&reader, metaData);
-    tparquet::FileMetaData t_metadata = metaData->to_thrift_metadata();
+    std::shared_ptr<FileMetaData> metadata;
+    parse_thrift_footer(reader, metadata);
+    tparquet::FileMetaData t_metadata = metadata->to_thrift();
     FieldDescriptor schema_descriptor;
     schema_descriptor.parse_from_thrift(t_metadata.schema);
     level_t defs[rows];
@@ -283,7 +301,7 @@ static void read_parquet_data_and_check(const std::string& parquet_file,
         auto& column_name_with_type = block->get_by_position(c);
         auto& data_column = column_name_with_type.column;
         auto& data_type = column_name_with_type.type;
-        get_column_values(&reader, &t_metadata.row_groups[0].columns[c],
+        get_column_values(reader, &t_metadata.row_groups[0].columns[c],
                           const_cast<FieldSchema*>(schema_descriptor.get_column(c)), data_column,
                           data_type, defs);
     }
@@ -292,7 +310,7 @@ static void read_parquet_data_and_check(const std::string& parquet_file,
         auto& column_name_with_type = block->get_by_position(14);
         auto& data_column = column_name_with_type.column;
         auto& data_type = column_name_with_type.type;
-        get_column_values(&reader, &t_metadata.row_groups[0].columns[13],
+        get_column_values(reader, &t_metadata.row_groups[0].columns[13],
                           const_cast<FieldSchema*>(schema_descriptor.get_column(13)), data_column,
                           data_type, defs);
     }
@@ -301,19 +319,20 @@ static void read_parquet_data_and_check(const std::string& parquet_file,
         auto& column_name_with_type = block->get_by_position(15);
         auto& data_column = column_name_with_type.column;
         auto& data_type = column_name_with_type.type;
-        get_column_values(&reader, &t_metadata.row_groups[0].columns[9],
+        get_column_values(reader, &t_metadata.row_groups[0].columns[9],
                           const_cast<FieldSchema*>(schema_descriptor.get_column(9)), data_column,
                           data_type, defs);
     }
 
-    LocalFileReader result(result_file, 0);
-    auto rst = result.open();
+    io::FileReaderSPtr result;
+    auto rst = local_fs->open_file(result_file, &result, nullptr);
     EXPECT_TRUE(rst.ok());
-    uint8_t result_buf[result.size() + 1];
-    result_buf[result.size()] = '\0';
-    int64_t bytes_read;
-    bool eof;
-    result.read(result_buf, result.size(), &bytes_read, &eof);
+    uint8_t result_buf[result->size() + 1];
+    result_buf[result->size()] = '\0';
+    size_t bytes_read;
+    Slice res(result_buf, result->size());
+    IOContext io_ctx;
+    result->read_at(0, res, io_ctx, &bytes_read);
     ASSERT_STREQ(block->dump_data(0, rows).c_str(), reinterpret_cast<char*>(result_buf));
 }
 
@@ -381,26 +400,34 @@ TEST_F(ParquetThriftReaderTest, group_reader) {
     tuple_slots.emplace_back(&string_slot);
 
     std::vector<ParquetReadColumn> read_columns;
+    RowGroupReader::LazyReadContext lazy_read_ctx;
     for (const auto& slot : tuple_slots) {
-        read_columns.emplace_back(ParquetReadColumn(slot));
+        lazy_read_ctx.all_read_columns.emplace_back(slot->col_name());
+        read_columns.emplace_back(ParquetReadColumn(7, slot->col_name()));
     }
-
-    LocalFileReader file_reader("./be/test/exec/test_data/parquet_scanner/type-decoder.parquet", 0);
-    auto st = file_reader.open();
+    io::FileSystemSPtr local_fs = std::make_shared<io::LocalFileSystem>("");
+    io::FileReaderSPtr file_reader;
+    auto st = local_fs->open_file("./be/test/exec/test_data/parquet_scanner/type-decoder.parquet",
+                                  &file_reader, nullptr);
     EXPECT_TRUE(st.ok());
 
     // prepare metadata
     std::shared_ptr<FileMetaData> meta_data;
-    parse_thrift_footer(&file_reader, meta_data);
-    tparquet::FileMetaData t_metadata = meta_data->to_thrift_metadata();
+    parse_thrift_footer(file_reader, meta_data);
+    tparquet::FileMetaData t_metadata = meta_data->to_thrift();
 
     cctz::time_zone ctz;
     TimezoneUtils::find_cctz_time_zone(TimezoneUtils::default_time_zone, ctz);
     auto row_group = t_metadata.row_groups[0];
     std::shared_ptr<RowGroupReader> row_group_reader;
-    row_group_reader.reset(new RowGroupReader(&file_reader, read_columns, 0, row_group, &ctz));
-    std::vector<RowRange> row_ranges = std::vector<RowRange>();
-    auto stg = row_group_reader->init(meta_data->schema(), row_ranges);
+    RowGroupReader::PositionDeleteContext position_delete_ctx(row_group.num_rows, 0);
+    row_group_reader.reset(new RowGroupReader(file_reader, read_columns, 0, row_group, &ctz,
+                                              position_delete_ctx, lazy_read_ctx));
+    std::vector<RowRange> row_ranges;
+    row_ranges.emplace_back(0, row_group.num_rows);
+
+    auto col_offsets = std::unordered_map<int, tparquet::OffsetIndex>();
+    auto stg = row_group_reader->init(meta_data->schema(), row_ranges, col_offsets);
     EXPECT_TRUE(stg.ok());
 
     vectorized::Block block;
@@ -412,17 +439,20 @@ TEST_F(ParquetThriftReaderTest, group_reader) {
                 ColumnWithTypeAndName(std::move(data_column), data_type, slot_desc->col_name()));
     }
     bool batch_eof = false;
-    auto stb = row_group_reader->next_batch(&block, 1024, &batch_eof);
+    size_t read_rows = 0;
+    auto stb = row_group_reader->next_batch(&block, 1024, &read_rows, &batch_eof);
     EXPECT_TRUE(stb.ok());
 
-    LocalFileReader result("./be/test/exec/test_data/parquet_scanner/group-reader.txt", 0);
-    auto rst = result.open();
+    io::FileReaderSPtr result;
+    auto rst = local_fs->open_file("./be/test/exec/test_data/parquet_scanner/group-reader.txt",
+                                   &result, nullptr);
     EXPECT_TRUE(rst.ok());
-    uint8_t result_buf[result.size() + 1];
-    result_buf[result.size()] = '\0';
-    int64_t bytes_read;
-    bool eof;
-    result.read(result_buf, result.size(), &bytes_read, &eof);
+    uint8_t result_buf[result->size() + 1];
+    result_buf[result->size()] = '\0';
+    size_t bytes_read;
+    Slice res(result_buf, result->size());
+    IOContext io_ctx;
+    result->read_at(0, res, io_ctx, &bytes_read);
     ASSERT_STREQ(block.dump_data(0, 10).c_str(), reinterpret_cast<char*>(result_buf));
 }
 } // namespace vectorized

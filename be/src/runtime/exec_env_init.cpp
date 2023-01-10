@@ -25,11 +25,12 @@
 #include "olap/segment_loader.h"
 #include "olap/storage_engine.h"
 #include "olap/storage_policy_mgr.h"
+#include "pipeline/task_scheduler.h"
+#include "runtime/block_spill_manager.h"
 #include "runtime/broker_mgr.h"
 #include "runtime/bufferpool/buffer_pool.h"
 #include "runtime/cache/result_cache.h"
 #include "runtime/client_cache.h"
-#include "runtime/data_stream_mgr.h"
 #include "runtime/disk_io_mgr.h"
 #include "runtime/exec_env.h"
 #include "runtime/external_scan_context_mgr.h"
@@ -39,12 +40,12 @@
 #include "runtime/load_channel_mgr.h"
 #include "runtime/load_path_mgr.h"
 #include "runtime/memory/mem_tracker.h"
-#include "runtime/memory/mem_tracker_task_pool.h"
 #include "runtime/result_buffer_mgr.h"
 #include "runtime/result_queue_mgr.h"
 #include "runtime/routine_load/routine_load_task_executor.h"
 #include "runtime/small_file_mgr.h"
 #include "runtime/stream_load/load_stream_mgr.h"
+#include "runtime/stream_load/new_load_stream_mgr.h"
 #include "runtime/stream_load/stream_load_executor.h"
 #include "runtime/thread_resource_mgr.h"
 #include "runtime/tmp_file_mgr.h"
@@ -72,10 +73,6 @@ DEFINE_GAUGE_METRIC_PROTOTYPE_2ARG(send_batch_thread_pool_thread_num, MetricUnit
 DEFINE_GAUGE_METRIC_PROTOTYPE_2ARG(send_batch_thread_pool_queue_size, MetricUnit::NOUNIT);
 DEFINE_GAUGE_METRIC_PROTOTYPE_2ARG(download_cache_thread_pool_thread_num, MetricUnit::NOUNIT);
 DEFINE_GAUGE_METRIC_PROTOTYPE_2ARG(download_cache_thread_pool_queue_size, MetricUnit::NOUNIT);
-DEFINE_GAUGE_METRIC_PROTOTYPE_5ARG(query_mem_consumption, MetricUnit::BYTES, "", mem_consumption,
-                                   Labels({{"type", "query"}}));
-DEFINE_GAUGE_METRIC_PROTOTYPE_5ARG(load_mem_consumption, MetricUnit::BYTES, "", mem_consumption,
-                                   Labels({{"type", "load"}}));
 
 Status ExecEnv::init(ExecEnv* env, const std::vector<StorePath>& store_paths) {
     return env->_init(store_paths);
@@ -93,52 +90,46 @@ Status ExecEnv::_init(const std::vector<StorePath>& store_paths) {
     }
 
     _external_scan_context_mgr = new ExternalScanContextMgr(this);
-    _stream_mgr = new DataStreamMgr();
     _vstream_mgr = new doris::vectorized::VDataStreamMgr();
     _result_mgr = new ResultBufferMgr();
     _result_queue_mgr = new ResultQueueMgr();
     _backend_client_cache = new BackendServiceClientCache(config::max_client_cache_size_per_host);
     _frontend_client_cache = new FrontendServiceClientCache(config::max_client_cache_size_per_host);
     _broker_client_cache = new BrokerServiceClientCache(config::max_client_cache_size_per_host);
-    _task_pool_mem_tracker_registry = new MemTrackerTaskPool();
     _thread_mgr = new ThreadResourceMgr();
     if (config::doris_enable_scanner_thread_pool_per_disk &&
         config::doris_scanner_thread_pool_thread_num >= store_paths.size() &&
         store_paths.size() > 0) {
         _scan_thread_pool = new PriorityWorkStealingThreadPool(
                 config::doris_scanner_thread_pool_thread_num, store_paths.size(),
-                config::doris_scanner_thread_pool_queue_size);
+                config::doris_scanner_thread_pool_queue_size, "olap_scanner");
         LOG(INFO) << "scan thread pool use PriorityWorkStealingThreadPool";
     } else {
         _scan_thread_pool = new PriorityThreadPool(config::doris_scanner_thread_pool_thread_num,
-                                                   config::doris_scanner_thread_pool_queue_size);
+                                                   config::doris_scanner_thread_pool_queue_size,
+                                                   "olap_scanner");
         LOG(INFO) << "scan thread pool use PriorityThreadPool";
     }
 
-    _remote_scan_thread_pool =
-            new PriorityThreadPool(config::doris_remote_scanner_thread_pool_thread_num,
-                                   config::doris_remote_scanner_thread_pool_queue_size);
+    _remote_scan_thread_pool = new PriorityThreadPool(
+            config::doris_remote_scanner_thread_pool_thread_num,
+            config::doris_remote_scanner_thread_pool_queue_size, "remote_scan");
 
     ThreadPoolBuilder("LimitedScanThreadPool")
-            .set_min_threads(1)
+            .set_min_threads(config::doris_scanner_thread_pool_thread_num)
             .set_max_threads(config::doris_scanner_thread_pool_thread_num)
             .set_max_queue_size(config::doris_scanner_thread_pool_queue_size)
             .build(&_limited_scan_thread_pool);
 
     ThreadPoolBuilder("SendBatchThreadPool")
-            .set_min_threads(1)
+            .set_min_threads(config::send_batch_thread_pool_thread_num)
             .set_max_threads(config::send_batch_thread_pool_thread_num)
             .set_max_queue_size(config::send_batch_thread_pool_queue_size)
             .build(&_send_batch_thread_pool);
 
-    ThreadPoolBuilder("DownloadCacheThreadPool")
-            .set_min_threads(1)
-            .set_max_threads(config::download_cache_thread_pool_thread_num)
-            .set_max_queue_size(config::download_cache_thread_pool_queue_size)
-            .build(&_download_cache_thread_pool);
-    set_serial_download_cache_thread_token();
-    init_download_cache_buf();
+    init_download_cache_required_components();
 
+    RETURN_IF_ERROR(init_pipeline_task_scheduler());
     _scanner_scheduler = new doris::vectorized::ScannerScheduler();
 
     _cgroups_mgr = new CgroupsMgr(this, config::doris_cgroups);
@@ -153,12 +144,14 @@ Status ExecEnv::_init(const std::vector<StorePath>& store_paths) {
     _broker_mgr = new BrokerMgr(this);
     _load_channel_mgr = new LoadChannelMgr();
     _load_stream_mgr = new LoadStreamMgr();
+    _new_load_stream_mgr = new NewLoadStreamMgr();
     _internal_client_cache = new BrpcClientCache<PBackendService_Stub>();
     _function_client_cache = new BrpcClientCache<PFunctionService_Stub>();
     _stream_load_executor = new StreamLoadExecutor(this);
     _routine_load_task_executor = new RoutineLoadTaskExecutor(this);
     _small_file_mgr = new SmallFileMgr(this, config::small_file_dir);
     _storage_policy_mgr = new StoragePolicyMgr();
+    _block_spill_mgr = new BlockSpillManager(_store_paths);
 
     _backend_client_cache->init_metrics("backend");
     _frontend_client_cache->init_metrics("frontend");
@@ -167,48 +160,42 @@ Status ExecEnv::_init(const std::vector<StorePath>& store_paths) {
     _cgroups_mgr->init_cgroups();
     Status status = _load_path_mgr->init();
     if (!status.ok()) {
-        LOG(ERROR) << "load path mgr init failed." << status.get_error_msg();
+        LOG(ERROR) << "load path mgr init failed." << status;
         exit(-1);
     }
     _broker_mgr->init();
     _small_file_mgr->init();
     _scanner_scheduler->init(this);
 
-    _init_mem_tracker();
+    _init_mem_env();
 
-    RETURN_IF_ERROR(
-            _load_channel_mgr->init(ExecEnv::GetInstance()->process_mem_tracker()->limit()));
+    RETURN_IF_ERROR(_load_channel_mgr->init(MemInfo::mem_limit()));
     _heartbeat_flags = new HeartbeatFlags();
     _register_metrics();
     _is_init = true;
     return Status::OK();
 }
 
-Status ExecEnv::_init_mem_tracker() {
-    // 1. init global memory limit.
-    int64_t global_memory_limit_bytes = 0;
+Status ExecEnv::init_pipeline_task_scheduler() {
+    auto executors_size = config::pipeline_executor_size;
+    if (executors_size <= 0) {
+        executors_size = CpuInfo::num_cores();
+    }
+    auto t_queue = std::make_shared<pipeline::TaskQueue>(executors_size);
+    auto b_scheduler = std::make_shared<pipeline::BlockedTaskScheduler>(t_queue);
+    _pipeline_task_scheduler = new pipeline::TaskScheduler(this, b_scheduler, t_queue);
+    RETURN_IF_ERROR(_pipeline_task_scheduler->start());
+    return Status::OK();
+}
+
+Status ExecEnv::_init_mem_env() {
     bool is_percent = false;
     std::stringstream ss;
-    global_memory_limit_bytes =
-            ParseUtil::parse_mem_spec(config::mem_limit, -1, MemInfo::physical_mem(), &is_percent);
-    if (global_memory_limit_bytes <= 0) {
-        ss << "Failed to parse mem limit from '" + config::mem_limit + "'.";
-        return Status::InternalError(ss.str());
-    }
-
-    if (global_memory_limit_bytes > MemInfo::physical_mem()) {
-        LOG(WARNING) << "Memory limit "
-                     << PrettyPrinter::print(global_memory_limit_bytes, TUnit::BYTES)
-                     << " exceeds physical memory of "
-                     << PrettyPrinter::print(MemInfo::physical_mem(), TUnit::BYTES)
-                     << ". Using physical memory instead";
-        global_memory_limit_bytes = MemInfo::physical_mem();
-    }
-    _process_mem_tracker =
-            std::make_shared<MemTrackerLimiter>(global_memory_limit_bytes, "Process");
-    _process_mem_tracker_raw = _process_mem_tracker.get();
-    thread_context()->_thread_mem_tracker_mgr->init();
-    thread_context()->_thread_mem_tracker_mgr->set_check_attach(false);
+    // 1. init mem tracker
+    _orphan_mem_tracker =
+            std::make_shared<MemTrackerLimiter>(MemTrackerLimiter::Type::GLOBAL, "Orphan");
+    _orphan_mem_tracker_raw = _orphan_mem_tracker.get();
+    thread_context()->thread_mem_tracker_mgr->init();
 #if defined(USE_MEM_TRACKER) && !defined(__SANITIZE_ADDRESS__) && !defined(ADDRESS_SANITIZER) && \
         !defined(LEAK_SANITIZER) && !defined(THREAD_SANITIZER) && !defined(USE_JEMALLOC)
     if (doris::config::enable_tcmalloc_hook) {
@@ -216,27 +203,14 @@ Status ExecEnv::_init_mem_tracker() {
     }
 #endif
 
-    _query_pool_mem_tracker =
-            std::make_shared<MemTrackerLimiter>(-1, "QueryPool", _process_mem_tracker);
-    REGISTER_HOOK_METRIC(query_mem_consumption,
-                         [this]() { return _query_pool_mem_tracker->consumption(); });
-    _load_pool_mem_tracker =
-            std::make_shared<MemTrackerLimiter>(-1, "LoadPool", _process_mem_tracker);
-    REGISTER_HOOK_METRIC(load_mem_consumption,
-                         [this]() { return _load_pool_mem_tracker->consumption(); });
-    LOG(INFO) << "Using global memory limit: "
-              << PrettyPrinter::print(global_memory_limit_bytes, TUnit::BYTES)
-              << ", origin config value: " << config::mem_limit;
-
     // 2. init buffer pool
     if (!BitUtil::IsPowerOf2(config::min_buffer_size)) {
         ss << "Config min_buffer_size must be a power-of-two: " << config::min_buffer_size;
         return Status::InternalError(ss.str());
     }
 
-    int64_t buffer_pool_limit =
-            ParseUtil::parse_mem_spec(config::buffer_pool_limit, global_memory_limit_bytes,
-                                      MemInfo::physical_mem(), &is_percent);
+    int64_t buffer_pool_limit = ParseUtil::parse_mem_spec(
+            config::buffer_pool_limit, MemInfo::mem_limit(), MemInfo::physical_mem(), &is_percent);
     if (buffer_pool_limit <= 0) {
         ss << "Invalid config buffer_pool_limit value, must be a percentage or "
               "positive bytes value or percentage: "
@@ -244,7 +218,7 @@ Status ExecEnv::_init_mem_tracker() {
         return Status::InternalError(ss.str());
     }
     buffer_pool_limit = BitUtil::RoundDown(buffer_pool_limit, config::min_buffer_size);
-    while (!is_percent && buffer_pool_limit > global_memory_limit_bytes / 2) {
+    while (!is_percent && buffer_pool_limit > MemInfo::mem_limit() / 2) {
         // If buffer_pool_limit is not a percentage, and the value exceeds 50% of the total memory limit,
         // it is forced to be reduced to less than 50% of the total memory limit.
         // This is to ensure compatibility. In principle, buffer_pool_limit should be set as a percentage.
@@ -273,9 +247,9 @@ Status ExecEnv::_init_mem_tracker() {
 
     // 3. init storage page cache
     int64_t storage_cache_limit =
-            ParseUtil::parse_mem_spec(config::storage_page_cache_limit, global_memory_limit_bytes,
+            ParseUtil::parse_mem_spec(config::storage_page_cache_limit, MemInfo::mem_limit(),
                                       MemInfo::physical_mem(), &is_percent);
-    while (!is_percent && storage_cache_limit > global_memory_limit_bytes / 2) {
+    while (!is_percent && storage_cache_limit > MemInfo::mem_limit() / 2) {
         // Reason same as buffer_pool_limit
         storage_cache_limit = storage_cache_limit / 2;
     }
@@ -286,10 +260,24 @@ Status ExecEnv::_init_mem_tracker() {
               << PrettyPrinter::print(storage_cache_limit, TUnit::BYTES)
               << ", origin config value: " << config::storage_page_cache_limit;
 
-    SegmentLoader::create_global_instance(config::segment_cache_capacity);
+    uint64_t fd_number = config::min_file_descriptor_number;
+    struct rlimit l;
+    int ret = getrlimit(RLIMIT_NOFILE, &l);
+    if (ret != 0) {
+        LOG(WARNING) << "call getrlimit() failed. errno=" << strerror(errno)
+                     << ", use default configuration instead.";
+    } else {
+        fd_number = static_cast<uint64_t>(l.rlim_cur);
+    }
+    // SegmentLoader caches segments in rowset granularity. So the size of
+    // opened files will greater than segment_cache_capacity.
+    uint64_t segment_cache_capacity = fd_number / 3 * 2;
+    LOG(INFO) << "segment_cache_capacity = fd_number / 3 * 2, fd_number: " << fd_number
+              << " segment_cache_capacity: " << segment_cache_capacity;
+    SegmentLoader::create_global_instance(segment_cache_capacity);
 
     // 4. init other managers
-    RETURN_IF_ERROR(_disk_io_mgr->init(global_memory_limit_bytes));
+    RETURN_IF_ERROR(_disk_io_mgr->init(MemInfo::mem_limit()));
     RETURN_IF_ERROR(_tmp_file_mgr->init());
 
     // 5. init chunk allocator
@@ -300,14 +288,8 @@ Status ExecEnv::_init_mem_tracker() {
     }
 
     int64_t chunk_reserved_bytes_limit =
-            ParseUtil::parse_mem_spec(config::chunk_reserved_bytes_limit, global_memory_limit_bytes,
+            ParseUtil::parse_mem_spec(config::chunk_reserved_bytes_limit, MemInfo::mem_limit(),
                                       MemInfo::physical_mem(), &is_percent);
-    if (chunk_reserved_bytes_limit <= 0) {
-        ss << "Invalid config chunk_reserved_bytes_limit value, must be a percentage or "
-              "positive bytes value or percentage: "
-           << config::chunk_reserved_bytes_limit;
-        return Status::InternalError(ss.str());
-    }
     chunk_reserved_bytes_limit =
             BitUtil::RoundDown(chunk_reserved_bytes_limit, config::min_chunk_reserved_bytes);
     ChunkAllocator::init_instance(chunk_reserved_bytes_limit);
@@ -321,6 +303,23 @@ void ExecEnv::_init_buffer_pool(int64_t min_page_size, int64_t capacity,
                                 int64_t clean_pages_limit) {
     DCHECK(_buffer_pool == nullptr);
     _buffer_pool = new BufferPool(min_page_size, capacity, clean_pages_limit);
+}
+
+void ExecEnv::init_download_cache_buf() {
+    std::unique_ptr<char[]> download_cache_buf(new char[config::download_cache_buffer_size]);
+    memset(download_cache_buf.get(), 0, config::download_cache_buffer_size);
+    _download_cache_buf_map[_serial_download_cache_thread_token.get()] =
+            std::move(download_cache_buf);
+}
+
+void ExecEnv::init_download_cache_required_components() {
+    ThreadPoolBuilder("DownloadCacheThreadPool")
+            .set_min_threads(1)
+            .set_max_threads(config::download_cache_thread_pool_thread_num)
+            .set_max_queue_size(config::download_cache_thread_pool_queue_size)
+            .build(&_download_cache_thread_pool);
+    set_serial_download_cache_thread_token();
+    init_download_cache_buf();
 }
 
 void ExecEnv::_register_metrics() {
@@ -365,6 +364,7 @@ void ExecEnv::_destroy() {
     SAFE_DELETE(_load_path_mgr);
     SAFE_DELETE(_master_info);
     SAFE_DELETE(_fragment_mgr);
+    SAFE_DELETE(_pipeline_task_scheduler);
     SAFE_DELETE(_cgroups_mgr);
     SAFE_DELETE(_scan_thread_pool);
     SAFE_DELETE(_remote_scan_thread_pool);
@@ -374,16 +374,11 @@ void ExecEnv::_destroy() {
     SAFE_DELETE(_backend_client_cache);
     SAFE_DELETE(_result_mgr);
     SAFE_DELETE(_result_queue_mgr);
-    SAFE_DELETE(_stream_mgr);
     SAFE_DELETE(_stream_load_executor);
     SAFE_DELETE(_routine_load_task_executor);
     SAFE_DELETE(_external_scan_context_mgr);
     SAFE_DELETE(_heartbeat_flags);
-    SAFE_DELETE(_task_pool_mem_tracker_registry);
     SAFE_DELETE(_scanner_scheduler);
-
-    DEREGISTER_HOOK_METRIC(query_mem_consumption);
-    DEREGISTER_HOOK_METRIC(load_mem_consumption);
 
     _is_init = false;
 }

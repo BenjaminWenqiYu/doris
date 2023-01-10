@@ -32,7 +32,7 @@ VExprContext::VExprContext(VExpr* expr)
           _stale(false) {}
 
 VExprContext::~VExprContext() {
-    DCHECK(!_prepared || _closed);
+    DCHECK(!_prepared || _closed) << get_stack_trace();
 
     for (int i = 0; i < _fn_contexts.size(); ++i) {
         delete _fn_contexts[i];
@@ -110,6 +110,8 @@ int VExprContext::register_func(RuntimeState* state, const FunctionContext::Type
                                 int varargs_buffer_size) {
     _fn_contexts.push_back(FunctionContextImpl::create_context(
             state, _pool.get(), return_type, arg_types, varargs_buffer_size, false));
+    _fn_contexts.back()->impl()->set_check_overflow_for_decimal(
+            state->check_overflow_for_decimal());
     return _fn_contexts.size() - 1;
 }
 
@@ -118,7 +120,7 @@ Status VExprContext::filter_block(VExprContext* vexpr_ctx, Block* block, int col
         return Status::OK();
     }
     int result_column_id = -1;
-    vexpr_ctx->execute(block, &result_column_id);
+    RETURN_IF_ERROR(vexpr_ctx->execute(block, &result_column_id));
     return Block::filter_block(block, result_column_id, column_to_keep);
 }
 

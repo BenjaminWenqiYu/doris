@@ -68,20 +68,15 @@ public:
     void fetch_data(google::protobuf::RpcController* controller, const PFetchDataRequest* request,
                     PFetchDataResult* result, google::protobuf::Closure* done) override;
 
+    void fetch_table_schema(google::protobuf::RpcController* controller,
+                            const PFetchTableSchemaRequest* request,
+                            PFetchTableSchemaResult* result,
+                            google::protobuf::Closure* done) override;
+
     void tablet_writer_open(google::protobuf::RpcController* controller,
                             const PTabletWriterOpenRequest* request,
                             PTabletWriterOpenResult* response,
                             google::protobuf::Closure* done) override;
-
-    void tablet_writer_add_batch(google::protobuf::RpcController* controller,
-                                 const PTabletWriterAddBatchRequest* request,
-                                 PTabletWriterAddBatchResult* response,
-                                 google::protobuf::Closure* done) override;
-
-    void tablet_writer_add_batch_by_http(google::protobuf::RpcController* controller,
-                                         const ::doris::PEmptyRequest* request,
-                                         PTabletWriterAddBatchResult* response,
-                                         google::protobuf::Closure* done) override;
 
     void tablet_writer_add_block(google::protobuf::RpcController* controller,
                                  const PTabletWriterAddBlockRequest* request,
@@ -172,11 +167,6 @@ private:
                          const ::doris::PTransmitDataParams* request,
                          ::doris::PTransmitDataResult* response, ::google::protobuf::Closure* done,
                          const Status& extract_st);
-
-    void _tablet_writer_add_batch(google::protobuf::RpcController* controller,
-                                  const PTabletWriterAddBatchRequest* request,
-                                  PTabletWriterAddBatchResult* response,
-                                  google::protobuf::Closure* done);
 
     void _tablet_writer_add_block(google::protobuf::RpcController* controller,
                                   const PTabletWriterAddBlockRequest* request,

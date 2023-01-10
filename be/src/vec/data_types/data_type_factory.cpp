@@ -20,7 +20,7 @@
 
 #include "vec/data_types/data_type_factory.hpp"
 
-#include "vec/data_types/data_type_hll.h"
+#include "data_type_time.h"
 
 namespace doris::vectorized {
 
@@ -94,13 +94,19 @@ DataTypePtr DataTypeFactory::create_data_type(const TypeDescriptor& col_desc, bo
         break;
     case TYPE_TIME:
     case TYPE_TIMEV2:
+        nested = std::make_shared<vectorized::DataTypeTime>();
+        break;
     case TYPE_DOUBLE:
         nested = std::make_shared<vectorized::DataTypeFloat64>();
         break;
     case TYPE_STRING:
     case TYPE_CHAR:
     case TYPE_VARCHAR:
+    case TYPE_BINARY:
         nested = std::make_shared<vectorized::DataTypeString>();
+        break;
+    case TYPE_JSONB:
+        nested = std::make_shared<vectorized::DataTypeJsonb>();
         break;
     case TYPE_HLL:
         nested = std::make_shared<vectorized::DataTypeHLL>();
@@ -113,8 +119,8 @@ DataTypePtr DataTypeFactory::create_data_type(const TypeDescriptor& col_desc, bo
         break;
     case TYPE_DECIMAL32:
     case TYPE_DECIMAL64:
-    case TYPE_DECIMAL128:
-        nested = vectorized::create_decimal(col_desc.precision, col_desc.scale);
+    case TYPE_DECIMAL128I:
+        nested = vectorized::create_decimal(col_desc.precision, col_desc.scale, false);
         break;
     // Just Mock A NULL Type in Vec Exec Engine
     case TYPE_NULL:
@@ -182,6 +188,9 @@ DataTypePtr DataTypeFactory::_create_primitive_data_type(const FieldType& type, 
     case OLAP_FIELD_TYPE_STRING:
         result = std::make_shared<vectorized::DataTypeString>();
         break;
+    case OLAP_FIELD_TYPE_JSONB:
+        result = std::make_shared<vectorized::DataTypeJsonb>();
+        break;
     case OLAP_FIELD_TYPE_HLL:
         result = std::make_shared<vectorized::DataTypeHLL>();
         break;
@@ -193,8 +202,8 @@ DataTypePtr DataTypeFactory::_create_primitive_data_type(const FieldType& type, 
         break;
     case OLAP_FIELD_TYPE_DECIMAL32:
     case OLAP_FIELD_TYPE_DECIMAL64:
-    case OLAP_FIELD_TYPE_DECIMAL128:
-        result = vectorized::create_decimal(precision, scale);
+    case OLAP_FIELD_TYPE_DECIMAL128I:
+        result = vectorized::create_decimal(precision, scale, false);
         break;
     default:
         DCHECK(false) << "Invalid FieldType:" << (int)type;
@@ -246,6 +255,9 @@ DataTypePtr DataTypeFactory::create_data_type(const PColumnMeta& pcolumn) {
     case PGenericType::STRING:
         nested = std::make_shared<DataTypeString>();
         break;
+    case PGenericType::JSONB:
+        nested = std::make_shared<DataTypeJsonb>();
+        break;
     case PGenericType::DATE:
         nested = std::make_shared<DataTypeDate>();
         break;
@@ -269,6 +281,10 @@ DataTypePtr DataTypeFactory::create_data_type(const PColumnMeta& pcolumn) {
     case PGenericType::DECIMAL128:
         nested = std::make_shared<DataTypeDecimal<Decimal128>>(pcolumn.decimal_param().precision(),
                                                                pcolumn.decimal_param().scale());
+        break;
+    case PGenericType::DECIMAL128I:
+        nested = std::make_shared<DataTypeDecimal<Decimal128I>>(pcolumn.decimal_param().precision(),
+                                                                pcolumn.decimal_param().scale());
         break;
     case PGenericType::BITMAP:
         nested = std::make_shared<DataTypeBitMap>();

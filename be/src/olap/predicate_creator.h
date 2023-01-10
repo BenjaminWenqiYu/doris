@@ -18,13 +18,21 @@
 #pragma once
 
 #include <charconv>
+#include <type_traits>
 
+#include "exec/olap_utils.h"
+#include "exprs/bloomfilter_predicate.h"
+#include "exprs/create_predicate_function.h"
+#include "exprs/hybrid_set.h"
+#include "exprs/match_predicate.h"
+#include "olap/bloom_filter_predicate.h"
 #include "olap/column_predicate.h"
 #include "olap/comparison_predicate.h"
 #include "olap/in_list_predicate.h"
 #include "olap/null_predicate.h"
 #include "olap/tablet_schema.h"
-#include "runtime/type_limit.h"
+#include "runtime/define_primitive_type.h"
+#include "runtime/primitive_type.h"
 #include "util/date_func.h"
 #include "util/string_util.h"
 
@@ -169,8 +177,8 @@ inline std::unique_ptr<PredicateCreator<ConditionType>> get_creator(const FieldT
     case OLAP_FIELD_TYPE_DECIMAL64: {
         return std::make_unique<DecimalPredicateCreator<TYPE_DECIMAL64, PT, ConditionType>>();
     }
-    case OLAP_FIELD_TYPE_DECIMAL128: {
-        return std::make_unique<DecimalPredicateCreator<TYPE_DECIMAL128, PT, ConditionType>>();
+    case OLAP_FIELD_TYPE_DECIMAL128I: {
+        return std::make_unique<DecimalPredicateCreator<TYPE_DECIMAL128I, PT, ConditionType>>();
     }
     case OLAP_FIELD_TYPE_CHAR: {
         return std::make_unique<StringPredicateCreator<TYPE_CHAR, PT, ConditionType>>();
@@ -236,10 +244,6 @@ template <PredicateType PT>
 inline ColumnPredicate* create_list_predicate(const TabletColumn& column, int index,
                                               const std::vector<std::string>& conditions,
                                               bool opposite, MemPool* pool) {
-    if (column.type() == OLAP_FIELD_TYPE_BOOL) {
-        LOG(FATAL) << "Failed to create list preacate! input column type is invalid";
-        return nullptr;
-    }
     static_assert(PredicateTypeTraits::is_list(PT));
     return create_predicate<PT, std::vector<std::string>>(column, index, conditions, opposite,
                                                           pool);
@@ -259,6 +263,9 @@ inline ColumnPredicate* parse_to_predicate(TabletSchemaSPtr tablet_schema,
     if (to_lower(condition.condition_op) == "is") {
         return new NullPredicate(index, to_lower(condition.condition_values[0]) == "null",
                                  opposite);
+    } else if (is_match_condition(condition.condition_op)) {
+        return new MatchPredicate(index, condition.condition_values[0],
+                                  to_match_type(condition.condition_op));
     }
 
     if ((condition.condition_op == "*=" || condition.condition_op == "!*=") &&

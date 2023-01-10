@@ -23,6 +23,7 @@ import org.apache.doris.catalog.KeysType;
 import org.apache.doris.catalog.PrimitiveType;
 import org.apache.doris.catalog.ScalarType;
 import org.apache.doris.common.AnalysisException;
+import org.apache.doris.common.Config;
 import org.apache.doris.common.ExceptionChecker;
 import org.apache.doris.common.UserException;
 import org.apache.doris.common.util.PropertyAnalyzer;
@@ -157,10 +158,18 @@ public class CreateTableStmtTest {
         col4.setIsKey(false);
         cols.add(col4);
         // test merge-on-write
-        CreateTableStmt stmt = new CreateTableStmt(false, false, tblName, cols, "olap",
+        CreateTableStmt stmt1 = new CreateTableStmt(false, false, tblName, cols, "olap",
                 new KeysDesc(KeysType.UNIQUE_KEYS, colsName), null,
-                new HashDistributionDesc(10, Lists.newArrayList("col1")), properties, null, "");
-        stmt.analyze(analyzer);
+                new HashDistributionDesc(10, Lists.newArrayList("col3")), properties, null, "");
+        expectedEx.expect(AnalysisException.class);
+        expectedEx.expectMessage("Distribution column[col3] is not key column");
+        stmt1.analyze(analyzer);
+
+        CreateTableStmt stmt2 = new CreateTableStmt(false, false, tblName, cols, "olap",
+                new KeysDesc(KeysType.UNIQUE_KEYS, colsName), null,
+                new HashDistributionDesc(10, Lists.newArrayList("col3")), properties, null, "");
+        stmt2.analyze(analyzer);
+
         Assert.assertEquals(col3.getAggregateType(), AggregateType.NONE);
         Assert.assertEquals(col4.getAggregateType(), AggregateType.NONE);
         // clear
@@ -309,6 +318,7 @@ public class CreateTableStmtTest {
 
     @Test
     public void testCreateIcebergTable() throws UserException {
+        Config.disable_iceberg_hudi_table = false;
         Map<String, String> properties = new HashMap<>();
         properties.put("iceberg.database", "doris");
         properties.put("iceberg.table", "test");
@@ -324,6 +334,7 @@ public class CreateTableStmtTest {
 
     @Test
     public void testCreateHudiTable() throws UserException {
+        Config.disable_iceberg_hudi_table = false;
         Map<String, String> properties = new HashMap<>();
         properties.put("hudi.database", "doris");
         properties.put("hudi.table", "test");
@@ -340,6 +351,7 @@ public class CreateTableStmtTest {
 
     @Test
     public void testCreateHudiTableWithSchema() throws UserException {
+        Config.disable_iceberg_hudi_table = false;
         Map<String, String> properties = new HashMap<>();
         properties.put("hudi.database", "doris");
         properties.put("hudi.table", "test");

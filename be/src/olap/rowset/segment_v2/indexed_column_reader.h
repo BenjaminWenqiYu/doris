@@ -18,6 +18,7 @@
 #pragma once
 
 #include <memory>
+#include <string>
 
 #include "common/status.h"
 #include "env/env.h"
@@ -114,6 +115,10 @@ public:
     // Return NotFound if the given key is greater than all keys in this column.
     // Return NotSupported for column without value index.
     Status seek_at_or_after(const void* key, bool* exact_match);
+    Status seek_at_or_after(const std::string* key, bool* exact_match) {
+        Slice slice(key->data(), key->size());
+        return seek_at_or_after(static_cast<const void*>(&slice), exact_match);
+    }
 
     // Get the ordinal index that the iterator is currently pointed to.
     ordinal_t get_current_ordinal() const {
@@ -125,6 +130,9 @@ public:
     // into ColumnBlock. when read string type data, memory will allocated
     // from Arena
     Status next_batch(size_t* n, ColumnBlockView* column_view);
+
+    // After one seek, we can only call this function once to read data
+    Status next_batch(size_t* n, vectorized::MutableColumnPtr& dst);
 
 private:
     Status _read_data_page(const PagePointer& pp);

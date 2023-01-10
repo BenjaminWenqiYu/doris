@@ -40,7 +40,6 @@
 namespace doris {
 
 class MemPool;
-class RowBatch;
 class RowDescriptor;
 class Status;
 class Tuple;
@@ -63,6 +62,7 @@ private:
 
     Container data;
     IndexByName index_by_name;
+    std::vector<bool> row_same_bit;
 
     int64_t _decompress_time_ns = 0;
     int64_t _decompressed_bytes = 0;
@@ -70,11 +70,6 @@ private:
     mutable int64_t _compress_time_ns = 0;
 
 public:
-    // When we have some breaking change for serialize/deserialize, we should update data_version.
-    constexpr static int max_data_version = 0;
-    // -1: not contain data_version.
-    //  0: remove ColumnString's terminating zero.
-
     Block() = default;
     Block(std::initializer_list<ColumnWithTypeAndName> il);
     Block(const ColumnsWithTypeAndName& data_);
@@ -185,6 +180,8 @@ public:
     /// Returns number of rows from first column in block, not equal to nullptr. If no columns, returns 0.
     size_t rows() const;
 
+    std::string each_col_size();
+
     // Cut the rows in block, use in LIMIT operation
     void set_num_rows(size_t length);
 
@@ -261,8 +258,14 @@ public:
 
     void append_block_by_selector(MutableColumns& columns, const IColumn::Selector& selector) const;
 
+    static void filter_block_internal(Block* block, const std::vector<uint32_t>& columns_to_filter,
+                                      const IColumn::Filter& filter);
+
     static void filter_block_internal(Block* block, const IColumn::Filter& filter,
                                       uint32_t column_to_keep);
+
+    static Status filter_block(Block* block, const std::vector<uint32_t>& columns_to_filter,
+                               int filter_column_id, int column_to_keep);
 
     static Status filter_block(Block* block, int filter_column_id, int column_to_keep);
 
@@ -273,12 +276,9 @@ public:
     }
 
     // serialize block to PBlock
-    Status serialize(PBlock* pblock, size_t* uncompressed_bytes, size_t* compressed_bytes,
-                     segment_v2::CompressionTypePB compression_type,
+    Status serialize(int be_exec_version, PBlock* pblock, size_t* uncompressed_bytes,
+                     size_t* compressed_bytes, segment_v2::CompressionTypePB compression_type,
                      bool allow_transfer_large_data = false) const;
-
-    // serialize block to PRowbatch
-    void serialize(RowBatch*, const RowDescriptor&);
 
     std::unique_ptr<Block> create_same_struct_block(size_t size) const;
 
@@ -343,15 +343,26 @@ public:
         return res;
     }
 
-    doris::Tuple* deep_copy_tuple(const TupleDescriptor&, MemPool*, int, int,
-                                  bool padding_char = false);
-
     // for String type or Array<String> type
     void shrink_char_type_column_suffix_zero(const std::vector<size_t>& char_type_idx);
 
     int64_t get_decompress_time() const { return _decompress_time_ns; }
     int64_t get_decompressed_bytes() const { return _decompressed_bytes; }
     int64_t get_compress_time() const { return _compress_time_ns; }
+
+    void set_same_bit(std::vector<bool>::const_iterator begin,
+                      std::vector<bool>::const_iterator end) {
+        row_same_bit.insert(row_same_bit.end(), begin, end);
+
+        DCHECK_EQ(row_same_bit.size(), rows());
+    }
+
+    bool get_same_bit(size_t position) {
+        if (position >= row_same_bit.size()) {
+            return false;
+        }
+        return row_same_bit[position];
+    }
 
 private:
     void erase_impl(size_t position);
@@ -448,7 +459,9 @@ public:
             DCHECK_EQ(_columns.size(), block.columns());
             for (int i = 0; i < _columns.size(); ++i) {
                 if (!_data_types[i]->equals(*block.get_by_position(i).type)) {
-                    DCHECK(_data_types[i]->is_nullable());
+                    DCHECK(_data_types[i]->is_nullable())
+                            << " target type: " << _data_types[i]->get_name()
+                            << " src type: " << block.get_by_position(i).type->get_name();
                     DCHECK(((DataTypeNullable*)_data_types[i].get())
                                    ->get_nested_type()
                                    ->equals(*block.get_by_position(i).type));

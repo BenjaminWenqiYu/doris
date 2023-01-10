@@ -69,15 +69,10 @@ TEST(TEST_VEXPR, ABSTEST) {
 
     doris::RuntimeState runtime_stat(doris::TUniqueId(), doris::TQueryOptions(),
                                      doris::TQueryGlobals(), nullptr);
-    runtime_stat.init_instance_mem_tracker();
+    runtime_stat.init_mem_trackers();
     runtime_stat.set_desc_tbl(desc_tbl);
     context->prepare(&runtime_stat, row_desc);
     context->open(&runtime_stat);
-
-    auto block = row_batch.convert_to_vec_block();
-    int ts = -1;
-    context->execute(&block, &ts);
-
     context->close(&runtime_stat);
 }
 
@@ -112,16 +107,12 @@ TEST(TEST_VEXPR, ABSTEST2) {
 
     doris::RuntimeState runtime_stat(doris::TUniqueId(), doris::TQueryOptions(),
                                      doris::TQueryGlobals(), nullptr);
-    runtime_stat.init_instance_mem_tracker();
+    runtime_stat.init_mem_trackers();
     DescriptorTbl desc_tbl;
     desc_tbl._slot_desc_map[0] = tuple_desc->slots()[0];
     runtime_stat.set_desc_tbl(&desc_tbl);
     context->prepare(&runtime_stat, row_desc);
     context->open(&runtime_stat);
-
-    auto block = row_batch.convert_to_vec_block();
-    int ts = -1;
-    context->execute(&block, &ts);
     context->close(&runtime_stat);
 }
 

@@ -28,9 +28,17 @@ namespace doris::vectorized {
 class Block;
 class VScanNode;
 
+// Counter for load
+struct ScannerCounter {
+    ScannerCounter() : num_rows_filtered(0), num_rows_unselected(0) {}
+
+    int64_t num_rows_filtered;   // unqualified rows (unmatched the dest schema, or no partition)
+    int64_t num_rows_unselected; // rows filtered by predicates
+};
+
 class VScanner {
 public:
-    VScanner(RuntimeState* state, VScanNode* parent, int64_t limit, MemTracker* mem_tracker);
+    VScanner(RuntimeState* state, VScanNode* parent, int64_t limit);
 
     virtual ~VScanner() {}
 
@@ -50,21 +58,15 @@ protected:
     // Update the counters before closing this scanner
     virtual void _update_counters_before_close();
 
-    // Init the input block if _input_tuple_desc is set.
-    // Otherwise, use output_block directly.
-    void _init_input_block(Block* output_block);
-
-    // Use prefilters to filter input block
-    Status _filter_input_block(Block* block);
-
-    // Convert input block to output block, if needed.
-    Status _convert_to_output_block(Block* output_block);
-
     // Filter the output block finally.
     Status _filter_output_block(Block* block);
 
 public:
     VScanNode* get_parent() { return _parent; }
+
+    int64_t get_time_cost_ns() const { return _per_scanner_timer; }
+
+    int64_t get_rows_read() const { return _num_rows_read; }
 
     Status try_append_late_arrival_runtime_filter();
 
@@ -75,7 +77,14 @@ public:
         _watch.start();
     }
 
+    void start_scan_cpu_timer() {
+        _cpu_watch.reset();
+        _cpu_watch.start();
+    }
+
     void update_wait_worker_timer() { _scanner_wait_worker_timer += _watch.elapsed_time(); }
+
+    void update_scan_cpu_timer() { _scan_cpu_timer += _cpu_watch.elapsed_time(); }
 
     RuntimeState* runtime_state() { return _state; }
 
@@ -103,6 +112,16 @@ public:
         _conjunct_ctxs = conjunct_ctxs;
     }
 
+    // return false if _is_counted_down is already true,
+    // otherwise, set _is_counted_down to true and return true.
+    bool set_counted_down() {
+        if (_is_counted_down) {
+            return false;
+        }
+        _is_counted_down = true;
+        return true;
+    }
+
 protected:
     void _discard_conjuncts() {
         if (_vconjunct_ctx) {
@@ -117,11 +136,10 @@ protected:
     VScanNode* _parent;
     // Set if scan node has sort limit info
     int64_t _limit = -1;
-    MemTracker* _mem_tracker;
 
-    const TupleDescriptor* _input_tuple_desc;
-    const TupleDescriptor* _output_tuple_desc;
-    const TupleDescriptor* _real_tuple_desc;
+    const TupleDescriptor* _input_tuple_desc = nullptr;
+    const TupleDescriptor* _output_tuple_desc = nullptr;
+    const TupleDescriptor* _real_tuple_desc = nullptr;
 
     // If _input_tuple_desc is set, the scanner will read data into
     // this _input_block first, then convert to the output block.
@@ -150,17 +168,28 @@ protected:
     // num of rows read from scanner
     int64_t _num_rows_read = 0;
 
+    // num of rows return from scanner, after filter block
+    int64_t _num_rows_return = 0;
+
     // Set true after counter is updated finally
     bool _has_updated_counter = false;
 
     // watch to count the time wait for scanner thread
     MonotonicStopWatch _watch;
+    // Do not use ScopedTimer. There is no guarantee that, the counter
+    ThreadCpuStopWatch _cpu_watch;
     int64_t _scanner_wait_worker_timer = 0;
+    int64_t _scan_cpu_timer = 0;
 
     // File formats based push down predicate
     std::vector<ExprContext*> _conjunct_ctxs;
 
     bool _is_load = false;
+    // set to true after decrease the "_num_unfinished_scanners" in scanner context
+    bool _is_counted_down = false;
+
+    ScannerCounter _counter;
+    int64_t _per_scanner_timer = 0;
 };
 
 } // namespace doris::vectorized

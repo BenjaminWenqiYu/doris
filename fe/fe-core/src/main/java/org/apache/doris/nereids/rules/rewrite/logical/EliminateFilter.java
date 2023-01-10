@@ -20,18 +20,38 @@ package org.apache.doris.nereids.rules.rewrite.logical;
 import org.apache.doris.nereids.rules.Rule;
 import org.apache.doris.nereids.rules.RuleType;
 import org.apache.doris.nereids.rules.rewrite.OneRewriteRuleFactory;
+import org.apache.doris.nereids.trees.expressions.Expression;
 import org.apache.doris.nereids.trees.expressions.literal.BooleanLiteral;
 import org.apache.doris.nereids.trees.plans.logical.LogicalEmptyRelation;
+import org.apache.doris.nereids.trees.plans.logical.LogicalFilter;
+
+import com.google.common.collect.Sets;
+
+import java.util.Set;
 
 /**
- * Eliminate filter false.
+ * Eliminate filter which is FALSE or TRUE.
  */
 public class EliminateFilter extends OneRewriteRuleFactory {
     @Override
     public Rule build() {
         return logicalFilter()
-                .when(filter -> filter.getPredicates() == BooleanLiteral.FALSE)
-                .then(filter -> new LogicalEmptyRelation(filter.getOutput()))
+                .when(filter -> filter.getConjuncts().stream().anyMatch(BooleanLiteral.class::isInstance))
+                .then(filter -> {
+                    Set<Expression> newConjuncts = Sets.newHashSetWithExpectedSize(filter.getConjuncts().size());
+                    for (Expression expression : filter.getConjuncts()) {
+                        if (expression == BooleanLiteral.FALSE) {
+                            return new LogicalEmptyRelation(filter.getOutput());
+                        } else if (expression != BooleanLiteral.TRUE) {
+                            newConjuncts.add(expression);
+                        }
+                    }
+                    if (newConjuncts.isEmpty()) {
+                        return filter.child();
+                    } else {
+                        return new LogicalFilter<>(newConjuncts, filter.child());
+                    }
+                })
                 .toRule(RuleType.ELIMINATE_FILTER);
     }
 }

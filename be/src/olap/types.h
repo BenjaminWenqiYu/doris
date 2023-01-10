@@ -20,6 +20,7 @@
 #include <math.h>
 #include <stdio.h>
 
+#include <cinttypes>
 #include <limits>
 #include <memory>
 #include <sstream>
@@ -29,7 +30,10 @@
 #include "olap/olap_common.h"
 #include "olap/olap_define.h"
 #include "runtime/collection_value.h"
+#include "runtime/jsonb_value.h"
 #include "runtime/mem_pool.h"
+#include "util/jsonb_document.h"
+#include "util/jsonb_utils.h"
 #include "util/mem_util.hpp"
 #include "util/mysql_global.h"
 #include "util/slice.h"
@@ -369,12 +373,12 @@ public:
 
     Status convert_from(void* dest, const void* src, const TypeInfo* src_type, MemPool* mem_pool,
                         size_t variable_len = 0) const override {
-        return Status::OLAPInternalError(OLAP_ERR_FUNC_NOT_IMPLEMENTED);
+        return Status::Error<ErrorCode::NOT_IMPLEMENTED_ERROR>();
     }
 
     Status from_string(void* buf, const std::string& scan_key, const int precision = 0,
                        const int scale = 0) const override {
-        return Status::OLAPInternalError(OLAP_ERR_FUNC_NOT_IMPLEMENTED);
+        return Status::Error<ErrorCode::NOT_IMPLEMENTED_ERROR>();
     }
 
     std::string to_string(const void* src) const override {
@@ -509,7 +513,7 @@ struct CppTypeTraits<OLAP_FIELD_TYPE_DECIMAL64> {
     using UnsignedCppType = uint64_t;
 };
 template <>
-struct CppTypeTraits<OLAP_FIELD_TYPE_DECIMAL128> {
+struct CppTypeTraits<OLAP_FIELD_TYPE_DECIMAL128I> {
     using CppType = int128_t;
     using UnsignedCppType = uint128_t;
 };
@@ -548,6 +552,10 @@ struct CppTypeTraits<OLAP_FIELD_TYPE_VARCHAR> {
 };
 template <>
 struct CppTypeTraits<OLAP_FIELD_TYPE_STRING> {
+    using CppType = Slice;
+};
+template <>
+struct CppTypeTraits<OLAP_FIELD_TYPE_JSONB> {
     using CppType = Slice;
 };
 template <>
@@ -618,7 +626,7 @@ struct BaseFieldtypeTraits : public CppTypeTraits<field_type> {
 
     static Status convert_from(void* dest, const void* src, const TypeInfo* src_type,
                                MemPool* mem_pool, size_t variable_len = 0) {
-        return Status::OLAPInternalError(OLAP_ERR_FUNC_NOT_IMPLEMENTED);
+        return Status::Error<ErrorCode::NOT_IMPLEMENTED_ERROR>();
     }
 
     static inline void set_to_max(void* buf) {
@@ -678,7 +686,7 @@ Status arithmetic_convert_from_varchar(void* dest, const void* src) {
     //TODO: use C++17 if constexpr to replace label assignment
     auto result = convert_from_varchar<T>(src_value, parse_res, std::is_integral<T>());
     if (UNLIKELY(parse_res != StringParser::PARSE_SUCCESS)) {
-        return Status::OLAPInternalError(OLAP_ERR_INVALID_SCHEMA);
+        return Status::Error<ErrorCode::INVALID_SCHEMA>();
     }
     memcpy(dest, &result, sizeof(T));
     return Status::OK();
@@ -708,7 +716,7 @@ struct NumericFieldtypeTraits : public BaseFieldtypeTraits<fieldType> {
         } else if (src_type->type() == OLAP_FIELD_TYPE_CHAR) {
             return numeric_convert_from_char<CppType>(dest, src);
         }
-        return Status::OLAPInternalError(OLAP_ERR_INVALID_SCHEMA);
+        return Status::Error<ErrorCode::INVALID_SCHEMA>();
     }
 };
 
@@ -782,7 +790,7 @@ struct FieldTypeTraits<OLAP_FIELD_TYPE_LARGEINT>
         int128_t value = reinterpret_cast<const PackedInt128*>(src)->value;
         if (value >= std::numeric_limits<int64_t>::min() &&
             value <= std::numeric_limits<int64_t>::max()) {
-            snprintf(buf, sizeof(buf), "%ld", (int64_t)value);
+            snprintf(buf, sizeof(buf), "%" PRId64, (int64_t)value);
         } else {
             char* current = buf;
             uint128_t abs_value = value;
@@ -943,7 +951,7 @@ struct FieldTypeTraits<OLAP_FIELD_TYPE_DECIMAL32>
                                                                  9, scale, &result);
 
         if (result == StringParser::PARSE_FAILURE) {
-            return Status::OLAPInternalError(OLAP_ERR_INPUT_PARAMETER_ERROR);
+            return Status::Error<ErrorCode::INVALID_ARGUMENT>();
         }
         *reinterpret_cast<int32_t*>(buf) = (int32_t)value;
         return Status::OK();
@@ -967,7 +975,7 @@ struct FieldTypeTraits<OLAP_FIELD_TYPE_DECIMAL64>
         int64_t value = StringParser::string_to_decimal<int64_t>(scan_key.c_str(), scan_key.size(),
                                                                  18, scale, &result);
         if (result == StringParser::PARSE_FAILURE) {
-            return Status::OLAPInternalError(OLAP_ERR_INPUT_PARAMETER_ERROR);
+            return Status::Error<ErrorCode::INVALID_ARGUMENT>();
         }
         *reinterpret_cast<int64_t*>(buf) = (int64_t)value;
         return Status::OK();
@@ -983,15 +991,15 @@ struct FieldTypeTraits<OLAP_FIELD_TYPE_DECIMAL64>
 };
 
 template <>
-struct FieldTypeTraits<OLAP_FIELD_TYPE_DECIMAL128>
-        : public BaseFieldtypeTraits<OLAP_FIELD_TYPE_DECIMAL128> {
+struct FieldTypeTraits<OLAP_FIELD_TYPE_DECIMAL128I>
+        : public BaseFieldtypeTraits<OLAP_FIELD_TYPE_DECIMAL128I> {
     static Status from_string(void* buf, const std::string& scan_key, const int precision,
                               const int scale) {
         StringParser::ParseResult result = StringParser::PARSE_SUCCESS;
         int128_t value = StringParser::string_to_decimal<int128_t>(
                 scan_key.c_str(), scan_key.size(), 38, scale, &result);
         if (result == StringParser::PARSE_FAILURE) {
-            return Status::OLAPInternalError(OLAP_ERR_INPUT_PARAMETER_ERROR);
+            return Status::Error<ErrorCode::INVALID_ARGUMENT>();
         }
         *reinterpret_cast<PackedInt128*>(buf) = value;
         return Status::OK();
@@ -1063,7 +1071,7 @@ struct FieldTypeTraits<OLAP_FIELD_TYPE_DATE> : public BaseFieldtypeTraits<OLAP_F
             SrcType src_value = *reinterpret_cast<const SrcType*>(src);
             DateTimeValue dt;
             if (!dt.from_date_int64(src_value)) {
-                return Status::OLAPInternalError(OLAP_ERR_INVALID_SCHEMA);
+                return Status::Error<ErrorCode::INVALID_SCHEMA>();
             }
             CppType year = static_cast<CppType>(src_value / 10000);
             CppType month = static_cast<CppType>((src_value % 10000) / 100);
@@ -1089,10 +1097,10 @@ struct FieldTypeTraits<OLAP_FIELD_TYPE_DATE> : public BaseFieldtypeTraits<OLAP_F
                     return Status::OK();
                 }
             }
-            return Status::OLAPInternalError(OLAP_ERR_INVALID_SCHEMA);
+            return Status::Error<ErrorCode::INVALID_SCHEMA>();
         }
 
-        return Status::OLAPInternalError(OLAP_ERR_INVALID_SCHEMA);
+        return Status::Error<ErrorCode::INVALID_SCHEMA>();
     }
     static void set_to_max(void* buf) {
         // max is 9999 * 16 * 32 + 12 * 32 + 31;
@@ -1169,7 +1177,7 @@ struct FieldTypeTraits<OLAP_FIELD_TYPE_DATEV2>
             SrcType src_value = *reinterpret_cast<const SrcType*>(src);
             doris::vectorized::DateV2Value<doris::vectorized::DateV2ValueType> dt;
             if (!dt.from_date_int64(src_value)) {
-                return Status::OLAPInternalError(OLAP_ERR_INVALID_SCHEMA);
+                return Status::Error<ErrorCode::INVALID_SCHEMA>();
             }
             CppType year = static_cast<CppType>(src_value / 10000);
             CppType month = static_cast<CppType>((src_value % 10000) / 100);
@@ -1195,10 +1203,10 @@ struct FieldTypeTraits<OLAP_FIELD_TYPE_DATEV2>
                     return Status::OK();
                 }
             }
-            return Status::OLAPInternalError(OLAP_ERR_INVALID_SCHEMA);
+            return Status::Error<ErrorCode::INVALID_SCHEMA>();
         }
 
-        return Status::OLAPInternalError(OLAP_ERR_INVALID_SCHEMA);
+        return Status::Error<ErrorCode::INVALID_SCHEMA>();
     }
     static void set_to_max(void* buf) {
         // max is 9999 * 16 * 32 + 12 * 32 + 31;
@@ -1279,7 +1287,7 @@ struct FieldTypeTraits<OLAP_FIELD_TYPE_DATETIMEV2>
                                                 << doris::vectorized::TIME_PART_LENGTH;
             return Status::OK();
         }
-        return Status::OLAPInternalError(OLAP_ERR_INVALID_SCHEMA);
+        return Status::Error<ErrorCode::INVALID_SCHEMA>();
     }
     static void set_to_max(void* buf) {
         // max is 9999 * 16 * 32 + 12 * 32 + 31;
@@ -1362,7 +1370,7 @@ struct FieldTypeTraits<OLAP_FIELD_TYPE_DATETIME>
             *reinterpret_cast<CppType*>(dest) = to_value.to_datetime_int64();
             return Status::OK();
         }
-        return Status::OLAPInternalError(OLAP_ERR_INVALID_SCHEMA);
+        return Status::Error<ErrorCode::INVALID_SCHEMA>();
     }
     static void set_to_max(void* buf) {
         // 设置为最大时间，其含义为：9999-12-31 23:59:59
@@ -1389,7 +1397,7 @@ struct FieldTypeTraits<OLAP_FIELD_TYPE_CHAR> : public BaseFieldtypeTraits<OLAP_F
         if (value_len > OLAP_VARCHAR_MAX_LENGTH) {
             LOG(WARNING) << "the len of value string is too long, len=" << value_len
                          << ", max_len=" << OLAP_VARCHAR_MAX_LENGTH;
-            return Status::OLAPInternalError(OLAP_ERR_INPUT_PARAMETER_ERROR);
+            return Status::Error<ErrorCode::INVALID_ARGUMENT>();
         }
 
         auto slice = reinterpret_cast<Slice*>(buf);
@@ -1463,7 +1471,7 @@ struct FieldTypeTraits<OLAP_FIELD_TYPE_VARCHAR> : public FieldTypeTraits<OLAP_FI
         if (value_len > OLAP_VARCHAR_MAX_LENGTH) {
             LOG(WARNING) << "the len of value string is too long, len=" << value_len
                          << ", max_len=" << OLAP_VARCHAR_MAX_LENGTH;
-            return Status::OLAPInternalError(OLAP_ERR_INPUT_PARAMETER_ERROR);
+            return Status::Error<ErrorCode::INVALID_ARGUMENT>();
         }
 
         auto slice = reinterpret_cast<Slice*>(buf);
@@ -1485,8 +1493,7 @@ struct FieldTypeTraits<OLAP_FIELD_TYPE_VARCHAR> : public FieldTypeTraits<OLAP_FI
         case OLAP_FIELD_TYPE_DOUBLE:
         case OLAP_FIELD_TYPE_DECIMAL: {
             auto result = src_type->to_string(src);
-            if (result.size() > variable_len)
-                return Status::OLAPInternalError(OLAP_ERR_INPUT_PARAMETER_ERROR);
+            if (result.size() > variable_len) return Status::Error<ErrorCode::INVALID_ARGUMENT>();
             auto slice = reinterpret_cast<Slice*>(dest);
             slice->data = reinterpret_cast<char*>(mem_pool->allocate(result.size()));
             memcpy(slice->data, result.c_str(), result.size());
@@ -1498,7 +1505,7 @@ struct FieldTypeTraits<OLAP_FIELD_TYPE_VARCHAR> : public FieldTypeTraits<OLAP_FI
             deep_copy(dest, src, mem_pool);
             return Status::OK();
         default:
-            return Status::OLAPInternalError(OLAP_ERR_INVALID_SCHEMA);
+            return Status::Error<ErrorCode::INVALID_SCHEMA>();
         }
     }
 
@@ -1516,7 +1523,7 @@ struct FieldTypeTraits<OLAP_FIELD_TYPE_STRING> : public FieldTypeTraits<OLAP_FIE
         if (value_len > config::string_type_length_soft_limit_bytes) {
             LOG(WARNING) << "the len of value string is too long, len=" << value_len
                          << ", max_len=" << config::string_type_length_soft_limit_bytes;
-            return Status::OLAPInternalError(OLAP_ERR_INPUT_PARAMETER_ERROR);
+            return Status::Error<ErrorCode::INVALID_ARGUMENT>();
         }
 
         auto slice = reinterpret_cast<Slice*>(buf);
@@ -1549,11 +1556,41 @@ struct FieldTypeTraits<OLAP_FIELD_TYPE_STRING> : public FieldTypeTraits<OLAP_FIE
             deep_copy(dest, src, mem_pool);
             return Status::OK();
         default:
-            return Status::OLAPInternalError(OLAP_ERR_INVALID_SCHEMA);
+            return Status::Error<ErrorCode::INVALID_SCHEMA>();
         }
     }
 
     static void set_to_min(void* buf) {
+        auto slice = reinterpret_cast<Slice*>(buf);
+        slice->size = 0;
+    }
+};
+
+template <>
+struct FieldTypeTraits<OLAP_FIELD_TYPE_JSONB> : public FieldTypeTraits<OLAP_FIELD_TYPE_VARCHAR> {
+    static int cmp(const void* left, const void* right) {
+        LOG(WARNING) << "can not compare JSONB values";
+        return -1; // always update ?
+    }
+
+    static Status from_string(void* buf, const std::string& scan_key, const int precision,
+                              const int scale) {
+        // TODO support schema change
+        return Status::Error<ErrorCode::INVALID_SCHEMA>();
+    }
+
+    static Status convert_from(void* dest, const void* src, const TypeInfo* src_type,
+                               MemPool* mem_pool, size_t variable_len = 0) {
+        // TODO support schema change
+        return Status::Error<ErrorCode::INVALID_SCHEMA>();
+    }
+
+    static void set_to_min(void* buf) {
+        auto slice = reinterpret_cast<Slice*>(buf);
+        slice->size = 0;
+    }
+
+    static void set_to_max(void* buf) {
         auto slice = reinterpret_cast<Slice*>(buf);
         slice->size = 0;
     }

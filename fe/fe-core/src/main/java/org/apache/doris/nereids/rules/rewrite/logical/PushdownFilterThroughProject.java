@@ -40,10 +40,10 @@ public class PushdownFilterThroughProject extends OneRewriteRuleFactory {
             return new LogicalProject<>(
                     project.getProjects(),
                     new LogicalFilter<>(
-                            ExpressionUtils.replace(filter.getPredicates(), project.getSlotToProducer()),
+                            ExpressionUtils.replace(filter.getConjuncts(), project.getAliasToProducer()),
                             project.child()
                     )
             );
-        }).toRule(RuleType.PUSHDOWN_FILTER_THROUGH_PROJET);
+        }).toRule(RuleType.PUSHDOWN_FILTER_THROUGH_PROJECT);
     }
 }

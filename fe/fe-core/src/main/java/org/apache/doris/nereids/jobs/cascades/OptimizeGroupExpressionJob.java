@@ -20,9 +20,7 @@ package org.apache.doris.nereids.jobs.cascades;
 import org.apache.doris.nereids.jobs.Job;
 import org.apache.doris.nereids.jobs.JobContext;
 import org.apache.doris.nereids.jobs.JobType;
-import org.apache.doris.nereids.memo.Group;
 import org.apache.doris.nereids.memo.GroupExpression;
-import org.apache.doris.nereids.pattern.Pattern;
 import org.apache.doris.nereids.rules.Rule;
 
 import java.util.ArrayList;
@@ -42,25 +40,17 @@ public class OptimizeGroupExpressionJob extends Job {
 
     @Override
     public void execute() {
+        countJobExecutionTimesOfGroupExpressions(groupExpression);
         List<Rule> validRules = new ArrayList<>();
         List<Rule> implementationRules = getRuleSet().getImplementationRules();
         List<Rule> explorationRules = getRuleSet().getExplorationRules();
-        validRules.addAll(getValidRules(groupExpression, explorationRules));
+
         validRules.addAll(getValidRules(groupExpression, implementationRules));
+        validRules.addAll(getValidRules(groupExpression, explorationRules));
         validRules.sort(Comparator.comparingInt(o -> o.getRulePromise().promise()));
 
         for (Rule rule : validRules) {
             pushJob(new ApplyRuleJob(groupExpression, rule, context));
-
-            // If child_pattern has any more children (i.e non-leaf), then we will explore the
-            // child before applying the rule. (assumes task pool is effectively a stack)
-            for (int i = 0; i < rule.getPattern().children().size(); ++i) {
-                Pattern childPattern = rule.getPattern().child(i);
-                if (childPattern.arity() > 0 && !childPattern.isGroup()) {
-                    Group child = groupExpression.child(i);
-                    pushJob(new ExploreGroupJob(child, context));
-                }
-            }
         }
     }
 }

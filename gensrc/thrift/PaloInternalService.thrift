@@ -168,15 +168,26 @@ struct TQueryOptions {
 
   46: optional string fragment_transmission_compression_codec;
 
-  47: optional bool enable_local_exchange;
+  48: optional bool enable_local_exchange;
 
   // For debug purpose, dont' merge unique key and agg key when reading data.
-  48: optional bool skip_storage_engine_merge = false
+  49: optional bool skip_storage_engine_merge = false
 
   // For debug purpose, skip delete predicates when reading data
-  49: optional bool skip_delete_predicate = false
+  50: optional bool skip_delete_predicate = false
 
-  50: optional bool enable_new_shuffle_hash_method = true
+  51: optional bool enable_new_shuffle_hash_method
+
+  52: optional i32 be_exec_version = 0
+  
+  53: optional i32 partitioned_hash_join_rows_threshold = 0
+
+  54: optional bool enable_share_hash_table_for_broadcast_join
+
+  55: optional bool enable_pipeline_engine = false
+
+  56: optional i32 repeat_max_num = 0
+  57: optional bool check_overflow_for_decimal = false
 }
     
 
@@ -291,6 +302,8 @@ struct TTxnParams {
   8: optional Types.TUniqueId fragment_instance_id
   9: optional i64 db_id
   10: optional double max_filter_ratio
+  // For load task with transaction, use this to indicate we use pipeline or not
+  11: optional bool enable_pipeline_txn_load = false;
 }
 
 // Definition of global dict, global dict is used to accelerate query performance of low cardinality data
@@ -365,6 +378,10 @@ struct TExecPlanFragmentParams {
   // it will wait for the FE to send the "start execution" command before it is actually executed.
   // Otherwise, the fragment will start executing directly on the BE side.
   20: optional bool need_wait_execution_trigger = false;
+
+  21: optional bool build_hash_table_for_broadcast_join = false;
+
+  22: optional list<Types.TUniqueId> instances_sharing_hash_table;
 }
 
 struct TExecPlanFragmentParamsList {

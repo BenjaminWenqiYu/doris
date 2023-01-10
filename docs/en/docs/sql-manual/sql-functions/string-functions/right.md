@@ -28,7 +28,7 @@ under the License.
 ### Description
 #### Syntax
 
-`VARCHAR RIGHT (VARCHAR STR)`
+`VARCHAR RIGHT (VARCHAR str, INT len)`
 
 
 It returns the right part of a string of specified length, length is char length not the byte size.
@@ -44,4 +44,4 @@ mysql> select right("Hello doris",5);
 +-------------------------+
 ```
 ### keywords
-RIGHT
+    RIGHT

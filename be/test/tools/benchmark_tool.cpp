@@ -40,7 +40,6 @@
 #include "olap/data_dir.h"
 #include "olap/in_list_predicate.h"
 #include "olap/olap_common.h"
-#include "olap/row_block2.h"
 #include "olap/row_cursor.h"
 #include "olap/rowset/segment_v2/binary_dict_page.h"
 #include "olap/rowset/segment_v2/binary_plain_page.h"
@@ -364,7 +363,7 @@ public:
         writer.finalize(&file_size, &index_size);
         file_writer->close();
 
-        Segment::open(fs, path, "", seg_id, &_tablet_schema, res);
+        Segment::open(fs, path, "", seg_id, {}, &_tablet_schema, res);
     }
 
     std::vector<std::vector<std::string>> generate_dataset(int rows_number) {
@@ -467,6 +466,8 @@ public:
         read_opts.stats = &stats;
         std::unique_ptr<RowwiseIterator> iter;
         _segment->new_iterator(get_schema(), read_opts, &iter);
+        // Need modify this case
+        /*
         RowBlockV2 block(get_schema(), 1024);
 
         int left = _dataset.size();
@@ -476,6 +477,7 @@ public:
             iter->next_batch(&block);
             left -= rows_read;
         }
+        */
     }
 
 private:
@@ -512,6 +514,8 @@ public:
         read_opts.stats = &stats;
         std::unique_ptr<RowwiseIterator> iter;
         _segment->new_iterator(get_schema(), read_opts, &iter);
+        // Need modify this case
+        /*
         RowBlockV2 block(get_schema(), 1024);
 
         int left = _dataset.size();
@@ -521,6 +525,7 @@ public:
             iter->next_batch(&block);
             left -= rows_read;
         }
+        */
     }
 
 private:

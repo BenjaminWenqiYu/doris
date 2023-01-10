@@ -37,6 +37,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
+/**
+ * Alter policy
+ **/
 @Data
 public class AlterPolicyStmt extends DdlStmt {
     private final String policyName;
@@ -65,7 +68,8 @@ public class AlterPolicyStmt extends DdlStmt {
         }
 
         // check resource existence
-        List<Policy> policiesByType = Env.getCurrentEnv().getPolicyMgr().getPoliciesByType(PolicyTypeEnum.STORAGE);
+        List<Policy> policiesByType = Env.getCurrentEnv().getPolicyMgr()
+                .getCopiedPoliciesByType(PolicyTypeEnum.STORAGE);
         Optional<Policy> hasPolicy = policiesByType.stream()
                 .filter(policy -> policy.getPolicyName().equals(this.policyName)).findAny();
         StoragePolicy storagePolicy = (StoragePolicy) hasPolicy.orElseThrow(
@@ -95,9 +99,9 @@ public class AlterPolicyStmt extends DdlStmt {
 
         if (properties.containsKey(StoragePolicy.COOLDOWN_TTL)) {
             hasCooldownTtl = true;
-            if (Integer.parseInt(properties.get(StoragePolicy.COOLDOWN_TTL)) < 0) {
-                throw new AnalysisException("cooldown_ttl must >= 0.");
-            }
+            // support 1h, 1hour to 3600s
+            properties.put(StoragePolicy.COOLDOWN_TTL, String.valueOf(
+                    StoragePolicy.getMsByCooldownTtl(properties.get(StoragePolicy.COOLDOWN_TTL)) / 1000));
         }
 
         if (hasCooldownDatetime && hasCooldownTtl) {

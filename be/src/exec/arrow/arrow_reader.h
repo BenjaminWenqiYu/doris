@@ -92,7 +92,7 @@ public:
         return Status::NotSupported("Not Implemented read");
     }
     // for vec
-    Status get_next_block(vectorized::Block* block, bool* eof) override;
+    Status get_next_block(vectorized::Block* block, size_t* read_row, bool* eof) override;
     // This method should be deprecated once the old scanner is removed.
     // And user should use "get_next_block" instead.
     Status next_batch(std::shared_ptr<arrow::RecordBatch>* batch, bool* eof);
@@ -121,6 +121,7 @@ protected:
     int _current_group;                     // current group(stripe)
     std::map<std::string, int> _map_column; // column-name <---> column-index
     std::vector<int> _include_column_ids;   // columns that need to get from file
+    std::vector<std::string> _include_cols; // columns that need to get from file
     std::shared_ptr<Statistics> _statistics;
 
     std::atomic<bool> _closed = false;
@@ -137,6 +138,8 @@ protected:
     // The following fields are only valid when using "get_block()" interface.
     std::shared_ptr<arrow::RecordBatch> _batch;
     size_t _arrow_batch_cur_idx = 0;
+    // Save col names which need to be read but does not exist in file
+    std::vector<std::string> _missing_cols;
 };
 
 } // namespace doris

@@ -18,6 +18,7 @@
 package org.apache.doris.catalog;
 
 import org.apache.doris.analysis.MVRefreshInfo;
+import org.apache.doris.analysis.MVRefreshInfo.BuildMode;
 import org.apache.doris.catalog.OlapTableFactory.MaterializedViewParams;
 import org.apache.doris.common.io.Text;
 import org.apache.doris.persist.gson.GsonUtils;
@@ -27,12 +28,31 @@ import com.google.gson.annotations.SerializedName;
 import java.io.DataInput;
 import java.io.DataOutput;
 import java.io.IOException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantLock;
+
 
 public class MaterializedView extends OlapTable {
+    @SerializedName("buildMode")
+    private BuildMode buildMode;
     @SerializedName("refreshInfo")
     private MVRefreshInfo refreshInfo;
     @SerializedName("query")
     private String query;
+
+    private final ReentrantLock mvTaskLock = new ReentrantLock(true);
+
+    public boolean tryMvTaskLock() {
+        try {
+            return mvTaskLock.tryLock(5, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            return false;
+        }
+    }
+
+    public void mvTaskUnLock() {
+        this.mvTaskLock.unlock();
+    }
 
     // For deserialization
     public MaterializedView() {
@@ -49,8 +69,13 @@ public class MaterializedView extends OlapTable {
                 params.distributionInfo
         );
         type = TableType.MATERIALIZED_VIEW;
+        buildMode = params.buildMode;
         refreshInfo = params.mvRefreshInfo;
         query = params.queryStmt.toSql();
+    }
+
+    public BuildMode getBuildMode() {
+        return buildMode;
     }
 
     public MVRefreshInfo getRefreshInfo() {
@@ -73,5 +98,6 @@ public class MaterializedView extends OlapTable {
         MaterializedView materializedView = GsonUtils.GSON.fromJson(Text.readString(in), this.getClass());
         refreshInfo = materializedView.refreshInfo;
         query = materializedView.query;
+        buildMode = materializedView.buildMode;
     }
 }

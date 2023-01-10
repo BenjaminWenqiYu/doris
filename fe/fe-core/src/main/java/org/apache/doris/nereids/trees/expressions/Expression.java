@@ -19,9 +19,10 @@ package org.apache.doris.nereids.trees.expressions;
 
 import org.apache.doris.nereids.analyzer.Unbound;
 import org.apache.doris.nereids.exceptions.AnalysisException;
-import org.apache.doris.nereids.exceptions.UnboundException;
 import org.apache.doris.nereids.trees.AbstractTreeNode;
+import org.apache.doris.nereids.trees.expressions.functions.ExpressionTrait;
 import org.apache.doris.nereids.trees.expressions.literal.Literal;
+import org.apache.doris.nereids.trees.expressions.literal.NullLiteral;
 import org.apache.doris.nereids.trees.expressions.shape.LeafExpression;
 import org.apache.doris.nereids.trees.expressions.typecoercion.ExpectsInputTypes;
 import org.apache.doris.nereids.trees.expressions.typecoercion.TypeCheckResult;
@@ -36,12 +37,13 @@ import org.apache.commons.lang3.StringUtils;
 
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 
 /**
  * Abstract class for all Expression in Nereids.
  */
-public abstract class Expression extends AbstractTreeNode<Expression> {
+public abstract class Expression extends AbstractTreeNode<Expression> implements ExpressionTrait {
 
     private static final String INPUT_CHECK_ERROR_MESSAGE = "argument %d requires %s type, however '%s' is of %s type";
 
@@ -49,24 +51,34 @@ public abstract class Expression extends AbstractTreeNode<Expression> {
         super(children);
     }
 
-    public DataType getDataType() throws UnboundException {
-        throw new UnboundException("dataType");
+    public Expression(List<Expression> children) {
+        super(Optional.empty(), children);
     }
 
-    public String toSql() throws UnboundException {
-        throw new UnboundException("sql");
-    }
-
-    public boolean nullable() throws UnboundException {
-        throw new UnboundException("nullable");
-    }
-
+    /**
+     * check input data types
+     */
     public TypeCheckResult checkInputDataTypes() {
         if (this instanceof ExpectsInputTypes) {
             ExpectsInputTypes expectsInputTypes = (ExpectsInputTypes) this;
             return checkInputDataTypes(children, expectsInputTypes.expectedInputTypes());
+        } else {
+            List<String> errorMessages = Lists.newArrayList();
+            // check all of its children recursively.
+            for (int i = 0; i < this.children.size(); ++i) {
+                Expression expression = this.children.get(i);
+                TypeCheckResult childResult = expression.checkInputDataTypes();
+                if (childResult != TypeCheckResult.SUCCESS) {
+                    errorMessages.add(String.format("argument %d type check fail: %s",
+                            i + 1, childResult.getMessage()));
+                }
+            }
+            if (errorMessages.isEmpty()) {
+                return TypeCheckResult.SUCCESS;
+            } else {
+                return new TypeCheckResult(false, StringUtils.join(errorMessages, ", "));
+            }
         }
-        return TypeCheckResult.SUCCESS;
     }
 
     private TypeCheckResult checkInputDataTypes(List<Expression> inputs, List<AbstractDataType> inputTypes) {
@@ -86,9 +98,7 @@ public abstract class Expression extends AbstractTreeNode<Expression> {
         return TypeCheckResult.SUCCESS;
     }
 
-    public <R, C> R accept(ExpressionVisitor<R, C> visitor, C context) {
-        return visitor.visit(this, context);
-    }
+    public abstract <R, C> R accept(ExpressionVisitor<R, C> visitor, C context);
 
     @Override
     public List<Expression> children() {
@@ -112,7 +122,7 @@ public abstract class Expression extends AbstractTreeNode<Expression> {
     /**
      * Whether the expression is a constant.
      */
-    public final boolean isConstant() {
+    public boolean isConstant() {
         if (this instanceof LeafExpression) {
             return this instanceof Literal;
         } else {
@@ -135,6 +145,22 @@ public abstract class Expression extends AbstractTreeNode<Expression> {
      */
     public final Set<Slot> getInputSlots() {
         return collect(Slot.class::isInstance);
+    }
+
+    public boolean isLiteral() {
+        return this instanceof Literal;
+    }
+
+    public boolean isNullLiteral() {
+        return this instanceof NullLiteral;
+    }
+
+    public boolean isSlot() {
+        return this instanceof Slot;
+    }
+
+    public boolean isAlias() {
+        return this instanceof Alias;
     }
 
     @Override
@@ -160,4 +186,5 @@ public abstract class Expression extends AbstractTreeNode<Expression> {
     public boolean hasUnbound() {
         return this.anyMatch(Unbound.class::isInstance);
     }
+
 }

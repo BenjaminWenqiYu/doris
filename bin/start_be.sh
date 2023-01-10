@@ -20,6 +20,11 @@ set -eo pipefail
 
 curdir="$(cd "$(dirname "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 
+if [[ "$(uname -s)" == 'Darwin' ]] && command -v brew &>/dev/null; then
+    PATH="$(brew --prefix)/opt/gnu-getopt/bin:${PATH}"
+    export PATH
+fi
+
 OPTS="$(getopt \
     -n "$0" \
     -o '' \
@@ -57,10 +62,12 @@ DORIS_HOME="$(
 )"
 export DORIS_HOME
 
-MAX_MAP_COUNT="$(sysctl -n vm.max_map_count)"
-if [[ "${MAX_MAP_COUNT}" -lt 2000000 ]]; then
-    echo "Please set vm.max_map_count to be 2000000. sysctl -w vm.max_map_count=2000000"
-    exit 1
+if [[ "$(uname -s)" != 'Darwin' ]]; then
+    MAX_MAP_COUNT="$(cat /proc/sys/vm/max_map_count)"
+    if [[ "${MAX_MAP_COUNT}" -lt 2000000 ]]; then
+        echo "Please set vm.max_map_count to be 2000000 under root using 'sysctl -w vm.max_map_count=2000000'."
+        exit 1
+    fi
 fi
 
 # add libs to CLASSPATH
@@ -96,35 +103,6 @@ jdk_version() {
     echo "${result}"
     return 0
 }
-
-setup_java_env() {
-    local java_version
-
-    if [[ -z "${JAVA_HOME}" ]]; then
-        return 1
-    fi
-
-    local jvm_arch='amd64'
-    if [[ "$(uname -m)" == 'aarch64' ]]; then
-        jvm_arch='aarch64'
-    fi
-    java_version="$(
-        set -e
-        jdk_version "${JAVA_HOME}/bin/java"
-    )"
-    if [[ "${java_version}" -gt 8 ]]; then
-        export LD_LIBRARY_PATH="${JAVA_HOME}/lib/server:${JAVA_HOME}/lib:${LD_LIBRARY_PATH}"
-        # JAVA_HOME is jdk
-    elif [[ -d "${JAVA_HOME}/jre" ]]; then
-        export LD_LIBRARY_PATH="${JAVA_HOME}/jre/lib/${jvm_arch}/server:${JAVA_HOME}/jre/lib/${jvm_arch}:${LD_LIBRARY_PATH}"
-        # JAVA_HOME is jre
-    else
-        export LD_LIBRARY_PATH="${JAVA_HOME}/lib/${jvm_arch}/server:${JAVA_HOME}/lib/${jvm_arch}:${LD_LIBRARY_PATH}"
-    fi
-}
-
-# prepare jvm if needed
-setup_java_env || true
 
 # export env variables from be.conf
 #
@@ -163,6 +141,14 @@ done <"${DORIS_HOME}/conf/be.conf"
 if [[ -e "${DORIS_HOME}/bin/palo_env.sh" ]]; then
     # shellcheck disable=1091
     source "${DORIS_HOME}/bin/palo_env.sh"
+fi
+
+if [[ -z "${JAVA_HOME}" ]]; then
+    echo "The JAVA_HOME environment variable is not defined correctly"
+    echo "This environment variable is needed to run this program"
+    echo "NB: JAVA_HOME should point to a JDK not a JRE"
+    echo "You can set it in be.conf"
+    exit 1
 fi
 
 if [[ ! -d "${LOG_DIR}" ]]; then
@@ -204,8 +190,51 @@ fi
 export ASAN_OPTIONS=symbolize=1:abort_on_error=1:disable_coredump=0:unmap_shadow_on_exit=1
 export UBSAN_OPTIONS=print_stacktrace=1
 
+## set TCMALLOC_HEAP_LIMIT_MB to limit memory used by tcmalloc
+set_tcmalloc_heap_limit() {
+    local total_mem_mb
+    local mem_limit_str
+
+    if [[ "$(uname -s)" != 'Darwin' ]]; then
+        total_mem_mb="$(free -m | grep Mem | awk '{print $2}')"
+    else
+        total_mem_mb="$(($(sysctl -a hw.memsize | awk '{print $NF}') / 1024))"
+    fi
+    mem_limit_str=$(grep ^mem_limit "${DORIS_HOME}"/conf/be.conf)
+    local digits_unit=${mem_limit_str##*=}
+    digits_unit="${digits_unit#"${digits_unit%%[![:space:]]*}"}"
+    digits_unit="${digits_unit%"${digits_unit##*[![:space:]]}"}"
+    local digits=${digits_unit%%[^[:digit:]]*}
+    local unit=${digits_unit##*[[:digit:] ]}
+
+    mem_limit_mb=0
+    case ${unit} in
+    t | T) mem_limit_mb=$((digits * 1024 * 1024)) ;;
+    g | G) mem_limit_mb=$((digits * 1024)) ;;
+    m | M) mem_limit_mb=$((digits)) ;;
+    k | K) mem_limit_mb=$((digits / 1024)) ;;
+    %) mem_limit_mb=$((total_mem_mb * digits / 100)) ;;
+    *) mem_limit_mb=$((digits / 1024 / 1024 / 1024)) ;;
+    esac
+
+    if [[ "${mem_limit_mb}" -eq 0 ]]; then
+        mem_limit_mb=$((total_mem_mb * 90 / 100))
+    fi
+
+    if [[ "${mem_limit_mb}" -gt "${total_mem_mb}" ]]; then
+        echo "mem_limit is larger than whole memory of the server. ${mem_limit_mb} > ${total_mem_mb}."
+        return 1
+    fi
+    export TCMALLOC_HEAP_LIMIT_MB=${mem_limit_mb}
+}
+
+# set_tcmalloc_heap_limit || exit 1
+
 ## set hdfs conf
 export LIBHDFS3_CONF="${DORIS_HOME}/conf/hdfs-site.xml"
+
+# see https://github.com/jemalloc/jemalloc/issues/2366
+export JEMALLOC_CONF="percpu_arena:percpu,background_thread:true,metadata_thp:auto,muzzy_decay_ms:30000,dirty_decay_ms:30000,oversize_threshold:0,lg_tcache_max:16,prof:true,prof_prefix:jeprof.out"
 
 if [[ "${RUN_DAEMON}" -eq 1 ]]; then
     nohup ${LIMIT:+${LIMIT}} "${DORIS_HOME}/lib/doris_be" "$@" >>"${LOG_DIR}/be.out" 2>&1 </dev/null &

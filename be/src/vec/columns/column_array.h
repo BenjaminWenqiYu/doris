@@ -78,7 +78,7 @@ public:
         return Base::create(std::forward<Args>(args)...);
     }
 
-    MutableColumnPtr get_shinked_column() override;
+    MutableColumnPtr get_shrinked_column() override;
 
     /** On the index i there is an offset to the beginning of the i + 1 -th element. */
     using ColumnOffsets = ColumnVector<Offset64>;
@@ -120,7 +120,8 @@ public:
     size_t allocated_bytes() const override;
     void protect() override;
     ColumnPtr replicate(const IColumn::Offsets& replicate_offsets) const override;
-    void replicate(const uint32_t* counts, size_t target_size, IColumn& column) const override;
+    void replicate(const uint32_t* counts, size_t target_size, IColumn& column, size_t begin = 0,
+                   int count_sz = -1) const override;
     ColumnPtr convert_to_full_column_if_const() const override;
     void get_extremes(Field& min, Field& max) const override {
         LOG(FATAL) << "get_extremes not implemented";
@@ -174,6 +175,8 @@ public:
         data->clear();
         offsets->clear();
     }
+
+    Status filter_by_selector(const uint16_t* sel, size_t sel_size, IColumn* col_ptr) override;
 
 private:
     WrappedPtr data;

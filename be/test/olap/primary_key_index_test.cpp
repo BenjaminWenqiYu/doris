@@ -28,6 +28,7 @@
 #include "util/key_util.h"
 
 namespace doris {
+using namespace ErrorCode;
 
 class PrimaryKeyIndexTest : public testing::Test {
 public:
@@ -75,7 +76,7 @@ TEST_F(PrimaryKeyIndexTest, builder) {
     FilePathDesc path_desc(filename);
     PrimaryKeyIndexReader index_reader;
     io::FileReaderSPtr file_reader;
-    EXPECT_TRUE(fs->open_file(filename, &file_reader).ok());
+    EXPECT_TRUE(fs->open_file(filename, &file_reader, nullptr).ok());
     EXPECT_TRUE(index_reader.parse_index(file_reader, index_meta).ok());
     EXPECT_TRUE(index_reader.parse_bf(file_reader, index_meta).ok());
     EXPECT_EQ(num_rows, index_reader.num_rows());
@@ -127,7 +128,7 @@ TEST_F(PrimaryKeyIndexTest, builder) {
         EXPECT_FALSE(exists);
         auto status = index_iterator->seek_at_or_after(&slice, &exact_match);
         EXPECT_FALSE(exact_match);
-        EXPECT_TRUE(status.is_not_found());
+        EXPECT_TRUE(status.is<NOT_FOUND>());
     }
 
     // read all key

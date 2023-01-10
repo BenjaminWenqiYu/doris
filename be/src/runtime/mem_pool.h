@@ -104,7 +104,9 @@ public:
     /// Allocates a section of memory of 'size' bytes with DEFAULT_ALIGNMENT at the end
     /// of the current chunk. Creates a new chunk if there aren't any chunks
     /// with enough capacity.
-    uint8_t* allocate(int64_t size) { return allocate<false>(size, DEFAULT_ALIGNMENT); }
+    uint8_t* allocate(int64_t size, bool free_old_chunks = false) {
+        return allocate<false>(size, DEFAULT_ALIGNMENT, free_old_chunks);
+    }
 
     uint8_t* allocate_aligned(int64_t size, int alignment) {
         DCHECK_GE(alignment, 1);
@@ -162,7 +164,6 @@ public:
 
     int64_t total_allocated_bytes() const { return total_allocated_bytes_; }
     int64_t total_reserved_bytes() const { return total_reserved_bytes_; }
-    int64_t peak_allocated_bytes() const { return peak_allocated_bytes_; }
 
     MemTracker* mem_tracker() { return _mem_tracker; }
 
@@ -203,21 +204,13 @@ private:
     /// if a new chunk needs to be created.
     /// If check_limits is true, this call can fail (returns false) if adding a
     /// new chunk exceeds the mem limits.
-    Status find_chunk(size_t min_size, bool check_limits);
+    Status find_chunk(size_t min_size, bool check_limits, bool free_old_chunks);
 
     /// Check integrity of the supporting data structures; always returns true but DCHECKs
     /// all invariants.
     /// If 'check_current_chunk_empty' is true, checks that the current chunk contains no
     /// data. Otherwise the current chunk can be either empty or full.
     bool check_integrity(bool check_current_chunk_empty);
-
-    void reset_peak() {
-        if (total_allocated_bytes_ - peak_allocated_bytes_ > 65536) {
-            THREAD_MEM_TRACKER_TRANSFER_FROM(total_allocated_bytes_ - peak_allocated_bytes_,
-                                             ExecEnv::GetInstance()->process_mem_tracker_raw());
-            peak_allocated_bytes_ = total_allocated_bytes_;
-        }
-    }
 
     /// Return offset to unoccupied space in current chunk.
     int64_t get_free_offset() const {
@@ -250,7 +243,6 @@ private:
             DCHECK_LE(info.allocated_bytes + size, info.chunk.size);
             info.allocated_bytes += padding + size;
             total_allocated_bytes_ += padding + size;
-            reset_peak();
             DCHECK_LE(current_chunk_idx_, chunks_.size() - 1);
             return result;
         }
@@ -258,7 +250,7 @@ private:
     }
 
     template <bool CHECK_LIMIT_FIRST>
-    uint8_t* ALWAYS_INLINE allocate(int64_t size, int alignment) {
+    uint8_t* ALWAYS_INLINE allocate(int64_t size, int alignment, bool free_old_chunks = false) {
         DCHECK_GE(size, 0);
         if (UNLIKELY(size == 0)) return reinterpret_cast<uint8_t*>(&k_zero_length_region_);
 
@@ -274,7 +266,8 @@ private:
         // guarantee alignment.
         //static_assert(
         //INITIAL_CHUNK_SIZE >= config::FLAGS_MEMORY_MAX_ALIGNMENT, "Min chunk size too low");
-        if (UNLIKELY(!find_chunk(size + DEFAULT_PADDING_SIZE, CHECK_LIMIT_FIRST))) return nullptr;
+        if (UNLIKELY(!find_chunk(size + DEFAULT_PADDING_SIZE, CHECK_LIMIT_FIRST, free_old_chunks)))
+            return nullptr;
 
         uint8_t* result = allocate_from_current_chunk(size, alignment);
         return result;
@@ -284,7 +277,7 @@ private:
     Status ALWAYS_INLINE allocate_safely(int64_t size, int alignment, uint8_t*& ret) {
         uint8_t* result = allocate<CHECK_LIMIT_FIRST>(size, alignment);
         if (result == nullptr) {
-            return Status::OLAPInternalError(OLAP_ERR_MALLOC_ERROR);
+            return Status::Error<ErrorCode::MEM_ALLOC_FAILED>();
         }
         ret = result;
         return Status::OK();
@@ -308,9 +301,6 @@ private:
     /// sum of all bytes allocated in chunks_
     int64_t total_reserved_bytes_;
 
-    /// Maximum number of bytes allocated from this pool at one time.
-    int64_t peak_allocated_bytes_;
-
     std::vector<ChunkInfo> chunks_;
 
     /// The current and peak memory footprint of this pool. This is different from
@@ -319,6 +309,6 @@ private:
 };
 
 // Stamp out templated implementations here so they're included in IR module
-template uint8_t* MemPool::allocate<false>(int64_t size, int alignment);
-template uint8_t* MemPool::allocate<true>(int64_t size, int alignment);
+template uint8_t* MemPool::allocate<false>(int64_t size, int alignment, bool free_old_chunks);
+template uint8_t* MemPool::allocate<true>(int64_t size, int alignment, bool free_old_chunks);
 } // namespace doris

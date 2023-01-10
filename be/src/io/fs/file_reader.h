@@ -17,15 +17,18 @@
 
 #pragma once
 
-#include <memory>
-
 #include "common/status.h"
 #include "gutil/macros.h"
 #include "io/fs/path.h"
 #include "util/slice.h"
 
 namespace doris {
+
+struct IOContext;
+
 namespace io {
+
+class FileSystem;
 
 class FileReader {
 public:
@@ -36,13 +39,16 @@ public:
 
     virtual Status close() = 0;
 
-    virtual Status read_at(size_t offset, Slice result, size_t* bytes_read) = 0;
+    virtual Status read_at(size_t offset, Slice result, const IOContext& io_ctx,
+                           size_t* bytes_read) = 0;
 
     virtual const Path& path() const = 0;
 
     virtual size_t size() const = 0;
 
     virtual bool closed() const = 0;
+
+    virtual std::shared_ptr<FileSystem> fs() const = 0;
 };
 
 using FileReaderSPtr = std::shared_ptr<FileReader>;

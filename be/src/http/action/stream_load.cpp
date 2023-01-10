@@ -40,16 +40,16 @@
 #include "http/http_request.h"
 #include "http/http_response.h"
 #include "http/utils.h"
+#include "io/fs/stream_load_pipe.h"
 #include "olap/storage_engine.h"
 #include "runtime/client_cache.h"
 #include "runtime/exec_env.h"
 #include "runtime/fragment_mgr.h"
 #include "runtime/load_path_mgr.h"
 #include "runtime/plan_fragment_executor.h"
-#include "runtime/stream_load/load_stream_mgr.h"
+#include "runtime/stream_load/new_load_stream_mgr.h"
 #include "runtime/stream_load/stream_load_context.h"
 #include "runtime/stream_load/stream_load_executor.h"
-#include "runtime/stream_load/stream_load_pipe.h"
 #include "runtime/stream_load/stream_load_recorder.h"
 #include "util/byte_buffer.h"
 #include "util/debug_util.h"
@@ -62,6 +62,7 @@
 #include "util/uid_util.h"
 
 namespace doris {
+using namespace ErrorCode;
 
 DEFINE_COUNTER_METRIC_PROTOTYPE_2ARG(streaming_load_requests_total, MetricUnit::REQUESTS);
 DEFINE_COUNTER_METRIC_PROTOTYPE_2ARG(streaming_load_duration_ms, MetricUnit::MILLISECONDS);
@@ -71,39 +72,47 @@ DEFINE_GAUGE_METRIC_PROTOTYPE_2ARG(streaming_load_current_processing, MetricUnit
 TStreamLoadPutResult k_stream_load_put_result;
 #endif
 
-static TFileFormatType::type parse_format(const std::string& format_str,
-                                          const std::string& compress_type) {
+static void parse_format(const std::string& format_str, const std::string& compress_type_str,
+                         TFileFormatType::type* format_type,
+                         TFileCompressType::type* compress_type) {
     if (format_str.empty()) {
-        return parse_format("CSV", compress_type);
+        parse_format("CSV", compress_type_str, format_type, compress_type);
+        return;
     }
-    TFileFormatType::type format_type = TFileFormatType::FORMAT_UNKNOWN;
+    *compress_type = TFileCompressType::PLAIN;
+    *format_type = TFileFormatType::FORMAT_UNKNOWN;
     if (iequal(format_str, "CSV")) {
-        if (compress_type.empty()) {
-            format_type = TFileFormatType::FORMAT_CSV_PLAIN;
-        }
-        if (iequal(compress_type, "GZ")) {
-            format_type = TFileFormatType::FORMAT_CSV_GZ;
-        } else if (iequal(compress_type, "LZO")) {
-            format_type = TFileFormatType::FORMAT_CSV_LZO;
-        } else if (iequal(compress_type, "BZ2")) {
-            format_type = TFileFormatType::FORMAT_CSV_BZ2;
-        } else if (iequal(compress_type, "LZ4FRAME")) {
-            format_type = TFileFormatType::FORMAT_CSV_LZ4FRAME;
-        } else if (iequal(compress_type, "LZOP")) {
-            format_type = TFileFormatType::FORMAT_CSV_LZOP;
-        } else if (iequal(compress_type, "DEFLATE")) {
-            format_type = TFileFormatType::FORMAT_CSV_DEFLATE;
+        if (compress_type_str.empty()) {
+            *format_type = TFileFormatType::FORMAT_CSV_PLAIN;
+        } else if (iequal(compress_type_str, "GZ")) {
+            *format_type = TFileFormatType::FORMAT_CSV_GZ;
+            *compress_type = TFileCompressType::GZ;
+        } else if (iequal(compress_type_str, "LZO")) {
+            *format_type = TFileFormatType::FORMAT_CSV_LZO;
+            *compress_type = TFileCompressType::LZO;
+        } else if (iequal(compress_type_str, "BZ2")) {
+            *format_type = TFileFormatType::FORMAT_CSV_BZ2;
+            *compress_type = TFileCompressType::BZ2;
+        } else if (iequal(compress_type_str, "LZ4")) {
+            *format_type = TFileFormatType::FORMAT_CSV_LZ4FRAME;
+            *compress_type = TFileCompressType::LZ4FRAME;
+        } else if (iequal(compress_type_str, "LZOP")) {
+            *format_type = TFileFormatType::FORMAT_CSV_LZOP;
+            *compress_type = TFileCompressType::LZO;
+        } else if (iequal(compress_type_str, "DEFLATE")) {
+            *format_type = TFileFormatType::FORMAT_CSV_DEFLATE;
+            *compress_type = TFileCompressType::DEFLATE;
         }
     } else if (iequal(format_str, "JSON")) {
-        if (compress_type.empty()) {
-            format_type = TFileFormatType::FORMAT_JSON;
+        if (compress_type_str.empty()) {
+            *format_type = TFileFormatType::FORMAT_JSON;
         }
     } else if (iequal(format_str, "PARQUET")) {
-        format_type = TFileFormatType::FORMAT_PARQUET;
+        *format_type = TFileFormatType::FORMAT_PARQUET;
     } else if (iequal(format_str, "ORC")) {
-        format_type = TFileFormatType::FORMAT_ORC;
+        *format_type = TFileFormatType::FORMAT_ORC;
     }
-    return format_type;
+    return;
 }
 
 static bool is_format_support_streaming(TFileFormatType::type format) {
@@ -143,20 +152,20 @@ void StreamLoadAction::handle(HttpRequest* req) {
     // status already set to fail
     if (ctx->status.ok()) {
         ctx->status = _handle(ctx);
-        if (!ctx->status.ok() && ctx->status.code() != TStatusCode::PUBLISH_TIMEOUT) {
+        if (!ctx->status.ok() && !ctx->status.is<PUBLISH_TIMEOUT>()) {
             LOG(WARNING) << "handle streaming load failed, id=" << ctx->id
-                         << ", errmsg=" << ctx->status.get_error_msg();
+                         << ", errmsg=" << ctx->status;
         }
     }
     ctx->load_cost_millis = UnixMillis() - ctx->start_millis;
 
-    if (!ctx->status.ok() && ctx->status.code() != TStatusCode::PUBLISH_TIMEOUT) {
+    if (!ctx->status.ok() && !ctx->status.is<PUBLISH_TIMEOUT>()) {
         if (ctx->need_rollback) {
             _exec_env->stream_load_executor()->rollback_txn(ctx);
             ctx->need_rollback = false;
         }
         if (ctx->body_sink.get() != nullptr) {
-            ctx->body_sink->cancel(ctx->status.get_error_msg());
+            ctx->body_sink->cancel(ctx->status.to_string());
         }
     }
 
@@ -170,7 +179,7 @@ void StreamLoadAction::handle(HttpRequest* req) {
         _save_stream_load_record(ctx, str);
     }
 #endif
-    // update statstics
+    // update statistics
     streaming_load_requests_total->increment(1);
     streaming_load_duration_ms->increment(ctx->load_cost_millis);
     streaming_load_current_processing->increment(-1);
@@ -232,13 +241,13 @@ int StreamLoadAction::on_header(HttpRequest* req) {
 
     auto st = _on_header(req, ctx);
     if (!st.ok()) {
-        ctx->status = st;
+        ctx->status = std::move(st);
         if (ctx->need_rollback) {
             _exec_env->stream_load_executor()->rollback_txn(ctx);
             ctx->need_rollback = false;
         }
         if (ctx->body_sink.get() != nullptr) {
-            ctx->body_sink->cancel(st.get_error_msg());
+            ctx->body_sink->cancel(ctx->status.to_string());
         }
         auto str = ctx->to_json();
         // add new line at end
@@ -275,14 +284,11 @@ Status StreamLoadAction::_on_header(HttpRequest* http_req, StreamLoadContext* ct
         //treat as CSV
         format_str = BeConsts::CSV;
     }
-    ctx->format = parse_format(format_str, http_req->header(HTTP_COMPRESS_TYPE));
+    parse_format(format_str, http_req->header(HTTP_COMPRESS_TYPE), &ctx->format,
+                 &ctx->compress_type);
     if (ctx->format == TFileFormatType::FORMAT_UNKNOWN) {
         return Status::InternalError("unknown data format, format={}",
                                      http_req->header(HTTP_FORMAT_KEY));
-    }
-
-    if (ctx->two_phase_commit && config::disable_stream_load_2pc) {
-        return Status::InternalError("Two phase commit (2PC) for stream load was disabled");
     }
 
     // check content length
@@ -352,8 +358,7 @@ void StreamLoadAction::on_chunk_data(HttpRequest* req) {
         bb->flip();
         auto st = ctx->body_sink->append(bb);
         if (!st.ok()) {
-            LOG(WARNING) << "append body content failed. errmsg=" << st.get_error_msg() << ", "
-                         << ctx->brief();
+            LOG(WARNING) << "append body content failed. errmsg=" << st << ", " << ctx->brief();
             ctx->status = st;
             return;
         }
@@ -387,13 +392,15 @@ Status StreamLoadAction::_process_put(HttpRequest* http_req, StreamLoadContext* 
     request.tbl = ctx->table;
     request.txnId = ctx->txn_id;
     request.formatType = ctx->format;
+    request.__set_compress_type(ctx->compress_type);
     request.__set_header_type(ctx->header_type);
     request.__set_loadId(ctx->id.to_thrift());
     if (ctx->use_streaming) {
-        auto pipe = std::make_shared<StreamLoadPipe>(kMaxPipeBufferedBytes /* max_buffered_bytes */,
-                                                     64 * 1024 /* min_chunk_size */,
-                                                     ctx->body_bytes /* total_length */);
-        RETURN_IF_ERROR(_exec_env->load_stream_mgr()->put(ctx->id, pipe));
+        auto pipe = std::make_shared<io::StreamLoadPipe>(
+                kMaxPipeBufferedBytes /* max_buffered_bytes */, 64 * 1024 /* min_chunk_size */,
+                ctx->body_bytes /* total_length */);
+        RETURN_IF_ERROR(_exec_env->new_load_stream_mgr()->put(ctx->id, pipe));
+
         request.fileType = TFileType::FILE_STREAM;
         ctx->body_sink = pipe;
     } else {
@@ -402,6 +409,7 @@ Status StreamLoadAction::_process_put(HttpRequest* http_req, StreamLoadContext* 
         RETURN_IF_ERROR(file_sink->open());
         request.__isset.path = true;
         request.fileType = TFileType::FILE_LOCAL;
+        request.__set_file_size(ctx->body_bytes);
         ctx->body_sink = file_sink;
     }
     if (!http_req->header(HTTP_COLUMNS).empty()) {
@@ -558,6 +566,13 @@ Status StreamLoadAction::_process_put(HttpRequest* http_req, StreamLoadContext* 
     if (!http_req->header(HTTP_HIDDEN_COLUMNS).empty()) {
         request.__set_hidden_columns(http_req->header(HTTP_HIDDEN_COLUMNS));
     }
+    if (!http_req->header(HTTP_TRIM_DOUBLE_QUOTES).empty()) {
+        if (iequal(http_req->header(HTTP_TRIM_DOUBLE_QUOTES), "true")) {
+            request.__set_trim_double_quotes(true);
+        } else {
+            request.__set_trim_double_quotes(false);
+        }
+    }
 
 #ifndef BE_TEST
     // plan this load
@@ -574,8 +589,7 @@ Status StreamLoadAction::_process_put(HttpRequest* http_req, StreamLoadContext* 
 #endif
     Status plan_status(ctx->put_result.status);
     if (!plan_status.ok()) {
-        LOG(WARNING) << "plan streaming load failed. errmsg=" << plan_status.get_error_msg()
-                     << ctx->brief();
+        LOG(WARNING) << "plan streaming load failed. errmsg=" << plan_status << ctx->brief();
         return plan_status;
     }
     VLOG_NOTICE << "params is " << apache::thrift::ThriftDebugString(ctx->put_result.params);

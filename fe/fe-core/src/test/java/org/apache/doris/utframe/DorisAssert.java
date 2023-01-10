@@ -127,7 +127,7 @@ public class DorisAssert {
         Env.getCurrentEnv().createMaterializedView(createMaterializedViewStmt);
         checkAlterJob();
         // waiting table state to normal
-        Thread.sleep(100);
+        Thread.sleep(1000);
         return this;
     }
 
@@ -137,7 +137,7 @@ public class DorisAssert {
         Env.getCurrentEnv().alterTable(alterTableStmt);
         checkAlterJob();
         // waiting table state to normal
-        Thread.sleep(100);
+        Thread.sleep(1000);
         return this;
     }
 
@@ -173,7 +173,7 @@ public class DorisAssert {
         }
 
         public void explainContains(String... keywords) throws Exception {
-            Assert.assertTrue(Stream.of(keywords).allMatch(explainQuery()::contains));
+            Assert.assertTrue(explainQuery(), Stream.of(keywords).allMatch(explainQuery()::contains));
         }
 
         public void explainContains(String keywords, int count) throws Exception {

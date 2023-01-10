@@ -41,6 +41,7 @@ import java.io.DataInput;
 import java.io.DataOutput;
 import java.io.IOException;
 import java.io.UnsupportedEncodingException;
+import java.math.BigDecimal;
 import java.util.Objects;
 
 public class StringLiteral extends LiteralExpr {
@@ -96,9 +97,9 @@ public class StringLiteral extends LiteralExpr {
         int minLength = Math.min(thisBytes.length, otherBytes.length);
         int i = 0;
         for (i = 0; i < minLength; i++) {
-            if (thisBytes[i] < otherBytes[i]) {
+            if (Byte.toUnsignedInt(thisBytes[i]) < Byte.toUnsignedInt(otherBytes[i])) {
                 return -1;
-            } else if (thisBytes[i] > otherBytes[i]) {
+            } else if (Byte.toUnsignedInt(thisBytes[i]) > Byte.toUnsignedInt(otherBytes[i])) {
                 return 1;
             }
         }
@@ -152,13 +153,18 @@ public class StringLiteral extends LiteralExpr {
     }
 
     @Override
+    public String getStringValueForArray() {
+        return "\"" + getStringValue() + "\"";
+    }
+
+    @Override
     public long getLongValue() {
         return Long.valueOf(value);
     }
 
     @Override
     public double getDoubleValue() {
-        return Double.valueOf(value);
+        return Double.parseDouble(value);
     }
 
     @Override
@@ -189,6 +195,16 @@ public class StringLiteral extends LiteralExpr {
             }
         }
         return newLiteral;
+    }
+
+    public boolean canConvertToDateV2(Type targetType) {
+        try {
+            Preconditions.checkArgument(targetType.isDateV2());
+            new DateLiteral(value, targetType);
+            return true;
+        } catch (AnalysisException e) {
+            return false;
+        }
     }
 
     @Override
@@ -229,7 +245,9 @@ public class StringLiteral extends LiteralExpr {
                 case DECIMAL32:
                 case DECIMAL64:
                 case DECIMAL128:
-                    return new DecimalLiteral(value);
+                    DecimalLiteral res = new DecimalLiteral(new BigDecimal(value));
+                    res.setType(targetType);
+                    return res;
                 default:
                     break;
             }
@@ -248,6 +266,8 @@ public class StringLiteral extends LiteralExpr {
             StringLiteral stringLiteral = new StringLiteral(this);
             stringLiteral.setType(targetType);
             return stringLiteral;
+        } else if (targetType.isJsonbType()) {
+            return new JsonLiteral(value);
         }
         return super.uncheckedCastTo(targetType);
     }

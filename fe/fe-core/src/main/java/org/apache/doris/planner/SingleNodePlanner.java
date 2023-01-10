@@ -55,9 +55,10 @@ import org.apache.doris.catalog.AggregateFunction;
 import org.apache.doris.catalog.AggregateType;
 import org.apache.doris.catalog.Column;
 import org.apache.doris.catalog.FunctionSet;
-import org.apache.doris.catalog.JdbcTable;
+import org.apache.doris.catalog.KeysType;
 import org.apache.doris.catalog.MysqlTable;
 import org.apache.doris.catalog.OdbcTable;
+import org.apache.doris.catalog.PrimitiveType;
 import org.apache.doris.catalog.Table;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.FeConstants;
@@ -66,7 +67,9 @@ import org.apache.doris.common.Reference;
 import org.apache.doris.common.UserException;
 import org.apache.doris.common.util.VectorizedUtil;
 import org.apache.doris.planner.external.ExternalFileScanNode;
+import org.apache.doris.qe.ConnectContext;
 import org.apache.doris.thrift.TNullSide;
+import org.apache.doris.thrift.TPushAggOp;
 
 import com.google.common.base.Preconditions;
 import com.google.common.base.Predicate;
@@ -85,6 +88,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -232,8 +236,13 @@ public class SingleNodePlanner {
     private PlanNode createQueryPlan(QueryStmt stmt, Analyzer analyzer, long defaultOrderByLimit)
             throws UserException {
         long newDefaultOrderByLimit = defaultOrderByLimit;
+        long defaultLimit = analyzer.getContext().getSessionVariable().defaultOrderByLimit;
         if (newDefaultOrderByLimit == -1) {
-            newDefaultOrderByLimit = 65535;
+            if (defaultLimit <= -1) {
+                newDefaultOrderByLimit = Long.MAX_VALUE;
+            } else {
+                newDefaultOrderByLimit = defaultLimit;
+            }
         }
         PlanNode root;
         if (stmt instanceof SelectStmt) {
@@ -296,7 +305,7 @@ public class SingleNodePlanner {
             // from SelectStmt outside
             root = addUnassignedConjuncts(analyzer, root);
         } else {
-            root.setLimit(stmt.getLimit());
+            root.setLimitAndOffset(stmt.getLimit(), stmt.getOffset());
             root.computeStats(analyzer);
         }
 
@@ -360,6 +369,152 @@ public class SingleNodePlanner {
         selectNode.init(analyzer);
         Preconditions.checkState(selectNode.hasValidStats());
         return selectNode;
+    }
+
+    private TPushAggOp freshTPushAggOpByName(String functionName, TPushAggOp originAggOp) {
+        TPushAggOp newPushAggOp = null;
+        if (functionName.equalsIgnoreCase("COUNT")) {
+            newPushAggOp = TPushAggOp.COUNT;
+        } else {
+            newPushAggOp = TPushAggOp.MINMAX;
+        }
+
+        if (originAggOp == null || newPushAggOp == originAggOp) {
+            return newPushAggOp;
+        }
+        return TPushAggOp.MIX;
+    }
+
+    private void pushDownAggNoGrouping(AggregateInfo aggInfo, SelectStmt selectStmt, Analyzer analyzer, PlanNode root) {
+        do {
+            // TODO: Support other scan node in the future
+            if (!(root instanceof OlapScanNode)) {
+                break;
+            }
+
+            KeysType type = ((OlapScanNode) root).getOlapTable().getKeysType();
+            if (type == KeysType.UNIQUE_KEYS || type == KeysType.PRIMARY_KEYS) {
+                break;
+            }
+
+            // TODO: Support muti table in the future
+            if (selectStmt.getTableRefs().size() != 1) {
+                break;
+            }
+
+            // No not support group by and where clause
+            if (null == aggInfo || !aggInfo.getGroupingExprs().isEmpty()) {
+                break;
+            }
+            List<Expr> allConjuncts = analyzer.getAllConjuncts(selectStmt.getTableRefs().get(0).getId());
+            if (allConjuncts != null) {
+                break;
+            }
+
+            List<FunctionCallExpr> aggExprs = aggInfo.getAggregateExprs();
+            boolean aggExprValidate = true;
+            TPushAggOp aggOp = null;
+            for (FunctionCallExpr aggExpr : aggExprs) {
+                // Only support `min`, `max`, `count` and `count` only effective in dup table
+                String functionName = aggExpr.getFnName().getFunction();
+                if (!functionName.equalsIgnoreCase("MAX")
+                        && !functionName.equalsIgnoreCase("MIN")
+                        && !functionName.equalsIgnoreCase("COUNT")) {
+                    aggExprValidate = false;
+                    break;
+                }
+
+                if (functionName.equalsIgnoreCase("COUNT")
+                        && type != KeysType.DUP_KEYS) {
+                    aggExprValidate = false;
+                    break;
+                }
+
+                aggOp = freshTPushAggOpByName(functionName, aggOp);
+
+                if (aggExpr.getChildren().size() > 1) {
+                    aggExprValidate = false;
+                    break;
+                }
+
+                boolean returnColumnValidate = true;
+                if (aggExpr.getChildren().size() == 1) {
+                    List<Column> returnColumns = Lists.newArrayList();
+                    if (!(aggExpr.getChild(0) instanceof SlotRef)) {
+                        Expr child = aggExpr.getChild(0);
+                        if ((child instanceof CastExpr) && (child.getChild(0) instanceof SlotRef)) {
+                            if (child.getType().isNumericType()
+                                    && child.getChild(0).getType().isNumericType()) {
+                                returnColumns.add(((SlotRef) child.getChild(0)).getDesc().getColumn());
+                            } else {
+                                aggExprValidate = false;
+                                break;
+                            }
+                        } else {
+                            aggExprValidate = false;
+                            break;
+                        }
+                    } else {
+                        returnColumns.add(((SlotRef) aggExpr.getChild(0)).getDesc().getColumn());
+                    }
+
+
+                    // check return columns
+                    for (Column col : returnColumns) {
+                        // TODO(zc): Here column is null is too bad
+                        // Only column of Inline-view will be null
+                        if (col == null) {
+                            continue;
+                        }
+
+                        // The value column of the agg does not support zone_map index.
+                        if (type == KeysType.AGG_KEYS && !col.isKey()) {
+                            returnColumnValidate = false;
+                            break;
+                        }
+
+                        // The zone map max length of CharFamily is 512, do not
+                        // over the length: https://github.com/apache/doris/pull/6293
+                        if (aggOp == TPushAggOp.MINMAX || aggOp == TPushAggOp.MIX) {
+                            PrimitiveType colType = col.getDataType();
+                            if (colType.isArrayType() || colType.isComplexType()
+                                    || colType == PrimitiveType.STRING) {
+                                returnColumnValidate = false;
+                                break;
+                            }
+
+                            if (colType.isCharFamily() && aggOp != TPushAggOp.COUNT
+                                    && col.getType().getLength() > 512) {
+                                returnColumnValidate = false;
+                                break;
+                            }
+                        }
+
+                        if (aggOp == TPushAggOp.COUNT || aggOp == TPushAggOp.MIX) {
+                            // NULL value behavior in `count` function is zero, so
+                            // we should not use row_count to speed up query. the col
+                            // must be not null
+                            if (col.isAllowNull()) {
+                                returnColumnValidate = false;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                if (!returnColumnValidate) {
+                    aggExprValidate = false;
+                    break;
+                }
+            }
+
+            if (!aggExprValidate) {
+                break;
+            }
+
+            OlapScanNode olapNode = (OlapScanNode) root;
+            olapNode.setPushDownAggNoGrouping(aggOp);
+        } while (false);
     }
 
     private void turnOffPreAgg(AggregateInfo aggInfo, SelectStmt selectStmt, Analyzer analyzer, PlanNode root) {
@@ -583,10 +738,15 @@ public class SingleNodePlanner {
                             returnColumnValidate = false;
                             break;
                         }
-                    } else if (functionName.equalsIgnoreCase("HLL_UNION_AGG")) {
-                        // do nothing
-                    } else if (functionName.equalsIgnoreCase("HLL_RAW_AGG")) {
-                        // do nothing
+                    } else if (functionName.equalsIgnoreCase(FunctionSet.HLL_UNION_AGG)
+                            || functionName.equalsIgnoreCase(FunctionSet.HLL_RAW_AGG)
+                            || functionName.equalsIgnoreCase(FunctionSet.HLL_UNION)) {
+                        if (col.getAggregationType() != AggregateType.HLL_UNION) {
+                            turnOffReason =
+                                    "Aggregate Operator not match: HLL_UNION <--> " + col.getAggregationType();
+                            returnColumnValidate = false;
+                            break;
+                        }
                     } else if (functionName.equalsIgnoreCase("NDV")) {
                         if ((!col.isKey())) {
                             turnOffReason = "NDV function with non-key column: " + col.getName();
@@ -776,8 +936,7 @@ public class SingleNodePlanner {
      * subplan ref are materialized by a join node added during plan generation.
      */
     // (ML): change the function name
-    private PlanNode createJoinPlan(Analyzer analyzer,
-                                    TableRef leftmostRef, List<Pair<TableRef, PlanNode>> refPlans)
+    private PlanNode createJoinPlan(Analyzer analyzer, TableRef leftmostRef, List<Pair<TableRef, PlanNode>> refPlans)
             throws UserException {
         LOG.debug("Try to create a query plan starting with " + leftmostRef.getUniqueAlias());
 
@@ -900,7 +1059,7 @@ public class SingleNodePlanner {
                         && candidateCardinalityIsSmaller(
                                 candidate, tblRefToPlanNodeOfCandidate.second.getCardinality(),
                                 newRoot, newRootRightChildCardinality)))
-                        || (candidate instanceof HashJoinNode && newRoot instanceof CrossJoinNode)) {
+                        || (candidate instanceof HashJoinNode && newRoot instanceof NestedLoopJoinNode)) {
                     newRoot = candidate;
                     minEntry = tblRefToPlanNodeOfCandidate;
                     newRootRightChildCardinality = cardinalityOfCandidate;
@@ -979,6 +1138,10 @@ public class SingleNodePlanner {
         }
 
         if (analyzer.hasEmptySpjResultSet() && selectStmt.getAggInfo() != null) {
+            GroupByClause groupByClause = selectStmt.getGroupByClause();
+            if (Objects.nonNull(groupByClause) && groupByClause.isGroupByExtension()) {
+                rowTuples.add(selectStmt.getGroupingInfo().getVirtualTuple().getId());
+            }
             final PlanNode emptySetNode = new EmptySetNode(ctx.getNextNodeId(), rowTuples);
             emptySetNode.init(analyzer);
             emptySetNode.setOutputSmap(selectStmt.getBaseTblSmap());
@@ -998,6 +1161,10 @@ public class SingleNodePlanner {
                 materializeTableResultForCrossJoinOrCountStar(ref, analyzer);
                 PlanNode plan = createTableRefNode(analyzer, ref, selectStmt);
                 turnOffPreAgg(aggInfo, selectStmt, analyzer, plan);
+                if (VectorizedUtil.isVectorized()
+                        && ConnectContext.get().getSessionVariable().enablePushDownNoGroupAgg) {
+                    pushDownAggNoGrouping(aggInfo, selectStmt, analyzer, plan);
+                }
 
                 if (plan instanceof OlapScanNode) {
                     OlapScanNode olapNode = (OlapScanNode) plan;
@@ -1026,6 +1193,10 @@ public class SingleNodePlanner {
             // selectStmt.seondSubstituteInlineViewExprs(analyzer.getChangeResSmap());
 
             turnOffPreAgg(aggInfo, selectStmt, analyzer, root);
+            if (VectorizedUtil.isVectorized()
+                    && ConnectContext.get().getSessionVariable().enablePushDownNoGroupAgg) {
+                pushDownAggNoGrouping(aggInfo, selectStmt, analyzer, root);
+            }
 
             if (root instanceof OlapScanNode) {
                 OlapScanNode olapNode = (OlapScanNode) root;
@@ -1399,6 +1570,7 @@ public class SingleNodePlanner {
                 unionNode.init(analyzer);
                 //set outputSmap to substitute literal in outputExpr
                 unionNode.setWithoutTupleIsNullOutputSmap(inlineViewRef.getSmap());
+                unionNode.setOutputSmap(inlineViewRef.getSmap());
                 if (analyzer.isOuterJoined(inlineViewRef.getId())) {
                     List<Expr> nullableRhs;
                     if (analyzer.isOuterJoinedLeftSide(inlineViewRef.getId())) {
@@ -1440,7 +1612,9 @@ public class SingleNodePlanner {
         }
         // Set output smap of rootNode *before* creating a SelectNode for proper resolution.
         rootNode.setOutputSmap(outputSmap);
-
+        if (rootNode instanceof UnionNode && ((UnionNode) rootNode).isConstantUnion()) {
+            rootNode.setWithoutTupleIsNullOutputSmap(outputSmap);
+        }
         // rootNode.setOutputSmap(ExprSubstitutionMap.compose(inlineViewRef.getBaseTblSmap(),
         //         rootNode.getOutputSmap(), analyzer));
         // Expr.substituteList(inlineViewRef.getViewStmt().getResultExprs(), analyzer.getChangeResSmap());
@@ -1736,6 +1910,8 @@ public class SingleNodePlanner {
                 OlapScanNode olapNode = new OlapScanNode(ctx.getNextNodeId(), tblRef.getDesc(),
                         "OlapScanNode");
                 olapNode.setForceOpenPreAgg(tblRef.isForcePreAggOpened());
+                olapNode.setSampleTabletIds(tblRef.getSampleTabletIds());
+                olapNode.setTableSample(tblRef.getTableSample());
                 scanNode = olapNode;
                 break;
             case ODBC:
@@ -1764,30 +1940,32 @@ public class SingleNodePlanner {
                         null, -1);
                 break;
             case ICEBERG:
-                scanNode = new IcebergScanNode(ctx.getNextNodeId(), tblRef.getDesc(), "IcebergScanNode",
-                        null, -1);
+                scanNode = new ExternalFileScanNode(ctx.getNextNodeId(), tblRef.getDesc());
                 break;
             case HUDI:
                 scanNode = new HudiScanNode(ctx.getNextNodeId(), tblRef.getDesc(), "HudiScanNode",
                         null, -1);
                 break;
             case JDBC:
-                scanNode = new JdbcScanNode(ctx.getNextNodeId(), tblRef.getDesc(), (JdbcTable) tblRef.getTable());
+                scanNode = new JdbcScanNode(ctx.getNextNodeId(), tblRef.getDesc(), false);
                 break;
             case TABLE_VALUED_FUNCTION:
-                scanNode = new TableValuedFunctionScanNode(ctx.getNextNodeId(), tblRef.getDesc(),
-                        "TableValuedFunctionScanNode", ((TableValuedFunctionRef) tblRef).getTableFunction());
+                scanNode = ((TableValuedFunctionRef) tblRef).getScanNode(ctx.getNextNodeId());
                 break;
             case HMS_EXTERNAL_TABLE:
-                scanNode = new ExternalFileScanNode(ctx.getNextNodeId(), tblRef.getDesc(), "HMS_FILE_SCAN_NODE");
+                scanNode = new ExternalFileScanNode(ctx.getNextNodeId(), tblRef.getDesc());
                 break;
             case ES_EXTERNAL_TABLE:
                 scanNode = new EsScanNode(ctx.getNextNodeId(), tblRef.getDesc(), "EsScanNode", true);
                 break;
+            case JDBC_EXTERNAL_TABLE:
+                scanNode = new JdbcScanNode(ctx.getNextNodeId(), tblRef.getDesc(), true);
+                break;
             default:
                 break;
         }
-        if (scanNode instanceof OlapScanNode || scanNode instanceof EsScanNode || scanNode instanceof HiveScanNode) {
+        if (scanNode instanceof OlapScanNode || scanNode instanceof EsScanNode || scanNode instanceof HiveScanNode
+                || scanNode instanceof ExternalFileScanNode) {
             if (analyzer.enableInferPredicate()) {
                 PredicatePushDown.visitScanNode(scanNode, tblRef.getJoinOp(), analyzer);
             }
@@ -1880,24 +2058,6 @@ public class SingleNodePlanner {
         // are materialized)
         getHashLookupJoinConjuncts(analyzer, outer, inner,
                 eqJoinConjuncts, errMsg, innerRef.getJoinOp());
-        if (eqJoinConjuncts.isEmpty()) {
-
-            // only inner join can change to cross join
-            if (innerRef.getJoinOp().isOuterJoin() || innerRef.getJoinOp().isSemiAntiJoin()) {
-                throw new AnalysisException("non-equal " + innerRef.getJoinOp().toString()
-                        + " is not supported");
-            }
-
-            // construct cross join node
-            // LOG.debug("Join between {} and {} requires at least one conjunctive"
-            //        + " equality predicate between the two tables",
-            //        outerRef.getAliasAsName(), innerRef.getAliasAsName());
-            // TODO If there are eq join predicates then we should construct a hash join
-            CrossJoinNode result =
-                    new CrossJoinNode(ctx.getNextNodeId(), outer, inner, innerRef);
-            result.init(analyzer);
-            return result;
-        }
         analyzer.markConjunctsAssigned(eqJoinConjuncts);
 
         List<Expr> ojConjuncts = Lists.newArrayList();
@@ -1905,16 +2065,27 @@ public class SingleNodePlanner {
             // Also assign conjuncts from On clause. All remaining unassigned conjuncts
             // that can be evaluated by this join are assigned in createSelectPlan().
             ojConjuncts = analyzer.getUnassignedOjConjuncts(innerRef);
-            analyzer.markConjunctsAssigned(ojConjuncts);
-        } else if (innerRef.getJoinOp().isSemiAntiJoin()) {
+        } else if (innerRef.getJoinOp().isAntiJoin()) {
+            ojConjuncts = analyzer.getUnassignedAntiJoinConjuncts(innerRef);
+        } else if (innerRef.getJoinOp().isSemiJoin()) {
             final List<TupleId> tupleIds = innerRef.getAllTupleIds();
             ojConjuncts = analyzer.getUnassignedConjuncts(tupleIds, false);
-            analyzer.markConjunctsAssigned(ojConjuncts);
+        }
+        analyzer.markConjunctsAssigned(ojConjuncts);
+        if (eqJoinConjuncts.isEmpty()) {
+            NestedLoopJoinNode result =
+                    new NestedLoopJoinNode(ctx.getNextNodeId(), outer, inner, innerRef);
+            List<Expr> joinConjuncts = Lists.newArrayList(eqJoinConjuncts);
+            joinConjuncts.addAll(ojConjuncts);
+            result.setJoinConjuncts(joinConjuncts);
+            result.addConjuncts(analyzer.getMarkConjuncts(innerRef));
+            result.init(analyzer);
+            return result;
         }
 
-        HashJoinNode result =
-                new HashJoinNode(ctx.getNextNodeId(), outer, inner, innerRef, eqJoinConjuncts,
-                        ojConjuncts);
+        HashJoinNode result = new HashJoinNode(ctx.getNextNodeId(), outer, inner,
+                innerRef, eqJoinConjuncts, ojConjuncts);
+        result.addConjuncts(analyzer.getMarkConjuncts(innerRef));
         result.init(analyzer);
         return result;
     }

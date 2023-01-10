@@ -28,13 +28,14 @@ namespace io {
 class S3FileReader final : public FileReader {
 public:
     S3FileReader(Path path, size_t file_size, std::string key, std::string bucket,
-                 S3FileSystem* fs);
+                 std::shared_ptr<S3FileSystem> fs);
 
     ~S3FileReader() override;
 
     Status close() override;
 
-    Status read_at(size_t offset, Slice result, size_t* bytes_read) override;
+    Status read_at(size_t offset, Slice result, const IOContext& io_ctx,
+                   size_t* bytes_read) override;
 
     const Path& path() const override { return _path; }
 
@@ -42,10 +43,12 @@ public:
 
     bool closed() const override { return _closed.load(std::memory_order_acquire); }
 
+    FileSystemSPtr fs() const override { return _fs; }
+
 private:
     Path _path;
     size_t _file_size;
-    S3FileSystem* _fs;
+    std::shared_ptr<S3FileSystem> _fs;
 
     std::string _bucket;
     std::string _key;

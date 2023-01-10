@@ -20,12 +20,10 @@ package org.apache.doris.nereids.trees.plans.logical;
 import org.apache.doris.nereids.memo.GroupExpression;
 import org.apache.doris.nereids.properties.LogicalProperties;
 import org.apache.doris.nereids.properties.UnboundLogicalProperties;
-import org.apache.doris.nereids.trees.expressions.Slot;
 import org.apache.doris.nereids.trees.plans.AbstractPlan;
 import org.apache.doris.nereids.trees.plans.Plan;
 import org.apache.doris.nereids.trees.plans.PlanType;
 
-import java.util.List;
 import java.util.Optional;
 
 /**
@@ -43,12 +41,7 @@ public abstract class AbstractLogicalPlan extends AbstractPlan implements Logica
 
     public AbstractLogicalPlan(PlanType type, Optional<GroupExpression> groupExpression,
                                Optional<LogicalProperties> logicalProperties, Plan... children) {
-        super(type, groupExpression, logicalProperties, children);
-    }
-
-    @Override
-    public List<Slot> getOutput() {
-        return getLogicalProperties().getOutput();
+        super(type, groupExpression, logicalProperties, null, children);
     }
 
     @Override
@@ -58,7 +51,7 @@ public abstract class AbstractLogicalPlan extends AbstractPlan implements Logica
         if (hasUnboundChild || hasUnboundExpression()) {
             return UnboundLogicalProperties.INSTANCE;
         } else {
-            return new LogicalProperties(this::computeOutput);
+            return new LogicalProperties(this::computeOutput, this::computeNonUserVisibleOutput);
         }
     }
 }

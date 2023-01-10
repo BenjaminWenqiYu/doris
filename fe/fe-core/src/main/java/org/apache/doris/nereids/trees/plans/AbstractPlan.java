@@ -18,9 +18,19 @@
 package org.apache.doris.nereids.trees.plans;
 
 import org.apache.doris.nereids.analyzer.Unbound;
+import org.apache.doris.nereids.analyzer.UnboundRelation;
 import org.apache.doris.nereids.memo.GroupExpression;
+import org.apache.doris.nereids.memo.Memo;
+import org.apache.doris.nereids.metrics.CounterType;
+import org.apache.doris.nereids.metrics.EventChannel;
+import org.apache.doris.nereids.metrics.EventProducer;
+import org.apache.doris.nereids.metrics.consumer.LogConsumer;
+import org.apache.doris.nereids.metrics.enhancer.AddCounterEventEnhancer;
+import org.apache.doris.nereids.metrics.event.CounterEvent;
 import org.apache.doris.nereids.properties.LogicalProperties;
+import org.apache.doris.nereids.properties.UnboundLogicalProperties;
 import org.apache.doris.nereids.trees.AbstractTreeNode;
+import org.apache.doris.nereids.trees.expressions.ExprId;
 import org.apache.doris.nereids.trees.expressions.Slot;
 import org.apache.doris.nereids.util.TreeStringUtils;
 import org.apache.doris.statistics.StatsDeriveResult;
@@ -31,34 +41,44 @@ import com.google.common.base.Suppliers;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
+import javax.annotation.Nullable;
 
 /**
  * Abstract class for all concrete plan node.
  */
 public abstract class AbstractPlan extends AbstractTreeNode<Plan> implements Plan {
-
-    protected StatsDeriveResult statsDeriveResult;
+    private static final EventProducer PLAN_CONSTRUCT_TRACER = new EventProducer(CounterEvent.class,
+            EventChannel.getDefaultChannel()
+                    .addEnhancers(new AddCounterEventEnhancer())
+                    .addConsumers(new LogConsumer(CounterEvent.class, EventChannel.LOG)));
+    protected final StatsDeriveResult statsDeriveResult;
     protected final PlanType type;
     protected final Optional<GroupExpression> groupExpression;
     protected final Supplier<LogicalProperties> logicalPropertiesSupplier;
 
     public AbstractPlan(PlanType type, Plan... children) {
-        this(type, Optional.empty(), Optional.empty(), children);
+        this(type, Optional.empty(), Optional.empty(), null, children);
     }
 
     public AbstractPlan(PlanType type, Optional<LogicalProperties> optLogicalProperties, Plan... children) {
-        this(type, Optional.empty(), optLogicalProperties, children);
+        this(type, Optional.empty(), optLogicalProperties, null, children);
     }
 
-    /** all parameter constructor. */
+    /**
+     * all parameter constructor.
+     */
     public AbstractPlan(PlanType type, Optional<GroupExpression> groupExpression,
-                        Optional<LogicalProperties> optLogicalProperties, Plan... children) {
+            Optional<LogicalProperties> optLogicalProperties, @Nullable StatsDeriveResult statsDeriveResult,
+            Plan... children) {
         super(groupExpression, children);
         this.type = Objects.requireNonNull(type, "type can not be null");
         this.groupExpression = Objects.requireNonNull(groupExpression, "groupExpression can not be null");
         Objects.requireNonNull(optLogicalProperties, "logicalProperties can not be null");
         this.logicalPropertiesSupplier = Suppliers.memoize(() -> optLogicalProperties.orElseGet(
                 this::computeLogicalProperties));
+        this.statsDeriveResult = statsDeriveResult;
+        PLAN_CONSTRUCT_TRACER.log(CounterEvent.of(Memo.getStateId(), CounterType.PLAN_CONSTRUCTOR, null, null, null));
     }
 
     @Override
@@ -68,6 +88,10 @@ public abstract class AbstractPlan extends AbstractTreeNode<Plan> implements Pla
 
     public Optional<GroupExpression> getGroupExpression() {
         return groupExpression;
+    }
+
+    public StatsDeriveResult getStats() {
+        return statsDeriveResult;
     }
 
     @Override
@@ -86,7 +110,9 @@ public abstract class AbstractPlan extends AbstractTreeNode<Plan> implements Pla
     public String treeString() {
         return TreeStringUtils.treeString(this,
                 plan -> plan.toString(),
-                plan -> (List) ((Plan) plan).children());
+                plan -> (List) ((Plan) plan).children(),
+                plan -> (List) ((Plan) plan).extraPlans(),
+                plan -> ((Plan) plan).displayExtraPlanFirst());
     }
 
     @Override
@@ -98,18 +124,34 @@ public abstract class AbstractPlan extends AbstractTreeNode<Plan> implements Pla
             return false;
         }
         AbstractPlan that = (AbstractPlan) o;
-        return Objects.equals(statsDeriveResult, that.statsDeriveResult)
-                && Objects.equals(getLogicalProperties(), that.getLogicalProperties());
+        // stats should don't need.
+        return Objects.equals(getLogicalProperties(), that.getLogicalProperties());
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(statsDeriveResult, getLogicalProperties());
+        // stats should don't need.
+        return Objects.hash(getLogicalProperties());
     }
 
     @Override
     public List<Slot> getOutput() {
         return getLogicalProperties().getOutput();
+    }
+
+    @Override
+    public List<Slot> getNonUserVisibleOutput() {
+        return getLogicalProperties().getNonUserVisibleOutput();
+    }
+
+    @Override
+    public Set<Slot> getOutputSet() {
+        return getLogicalProperties().getOutputSet();
+    }
+
+    @Override
+    public Set<ExprId> getOutputExprIdSet() {
+        return getLogicalProperties().getOutputExprIdSet();
     }
 
     @Override
@@ -119,6 +161,9 @@ public abstract class AbstractPlan extends AbstractTreeNode<Plan> implements Pla
 
     @Override
     public LogicalProperties getLogicalProperties() {
+        if (this instanceof UnboundRelation) {
+            return UnboundLogicalProperties.INSTANCE;
+        }
         return logicalPropertiesSupplier.get();
     }
 }

@@ -25,20 +25,19 @@
 #include "util/time.h"
 
 namespace doris {
+using namespace ErrorCode;
 
 class MemtableFlushTask final : public Runnable {
 public:
     MemtableFlushTask(FlushToken* flush_token, std::unique_ptr<MemTable> memtable,
-                      int64_t submit_task_time, const std::shared_ptr<MemTrackerLimiter>& tracker)
+                      int64_t submit_task_time)
             : _flush_token(flush_token),
               _memtable(std::move(memtable)),
-              _submit_task_time(submit_task_time),
-              _tracker(tracker) {}
+              _submit_task_time(submit_task_time) {}
 
     ~MemtableFlushTask() override = default;
 
     void run() override {
-        SCOPED_ATTACH_TASK(_tracker, ThreadContext::TaskType::LOAD);
         _flush_token->_flush_memtable(_memtable.get(), _submit_task_time);
         _memtable.reset();
     }
@@ -47,7 +46,6 @@ private:
     FlushToken* _flush_token;
     std::unique_ptr<MemTable> _memtable;
     int64_t _submit_task_time;
-    std::shared_ptr<MemTrackerLimiter> _tracker;
 };
 
 std::ostream& operator<<(std::ostream& os, const FlushStatistic& stat) {
@@ -60,15 +58,13 @@ std::ostream& operator<<(std::ostream& os, const FlushStatistic& stat) {
     return os;
 }
 
-Status FlushToken::submit(std::unique_ptr<MemTable> mem_table,
-                          const std::shared_ptr<MemTrackerLimiter>& tracker) {
-    ErrorCode s = _flush_status.load();
-    if (s != OLAP_SUCCESS) {
-        return Status::OLAPInternalError(s);
+Status FlushToken::submit(std::unique_ptr<MemTable> mem_table) {
+    auto s = _flush_status.load();
+    if (s != OK) {
+        return Status::Error(s);
     }
     int64_t submit_task_time = MonotonicNanos();
-    auto task = std::make_shared<MemtableFlushTask>(this, std::move(mem_table), submit_task_time,
-                                                    tracker);
+    auto task = std::make_shared<MemtableFlushTask>(this, std::move(mem_table), submit_task_time);
     _stats.flush_running_count++;
     return _flush_token->submit(std::move(task));
 }
@@ -79,14 +75,14 @@ void FlushToken::cancel() {
 
 Status FlushToken::wait() {
     _flush_token->wait();
-    ErrorCode s = _flush_status.load();
-    return s == OLAP_SUCCESS ? Status::OK() : Status::OLAPInternalError(s);
+    auto s = _flush_status.load();
+    return s == OK ? Status::OK() : Status::Error(s);
 }
 
 void FlushToken::_flush_memtable(MemTable* memtable, int64_t submit_task_time) {
     _stats.flush_wait_time_ns += (MonotonicNanos() - submit_task_time);
     // If previous flush has failed, return directly
-    if (_flush_status.load() != OLAP_SUCCESS) {
+    if (_flush_status.load() != OK) {
         return;
     }
 
@@ -95,10 +91,10 @@ void FlushToken::_flush_memtable(MemTable* memtable, int64_t submit_task_time) {
     Status s = memtable->flush();
     if (!s) {
         LOG(WARNING) << "Flush memtable failed with res = " << s;
+        // If s is not ok, ignore the code, just use other code is ok
+        _flush_status.store(ErrorCode::INTERNAL_ERROR);
     }
-    // If s is not ok, ignore the code, just use other code is ok
-    _flush_status.store(s.ok() ? OLAP_SUCCESS : OLAP_ERR_OTHER_ERROR);
-    if (_flush_status.load() != OLAP_SUCCESS) {
+    if (_flush_status.load() != OK) {
         return;
     }
 

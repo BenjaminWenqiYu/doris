@@ -29,6 +29,7 @@
 #include "gen_cpp/FrontendService_types.h"
 #include "runtime/exec_env.h"
 #include "runtime/stream_load/load_stream_mgr.h"
+#include "runtime/stream_load/new_load_stream_mgr.h"
 #include "runtime/stream_load/stream_load_executor.h"
 #include "service/backend_options.h"
 #include "util/string_util.h"
@@ -92,7 +93,7 @@ public:
             need_rollback = false;
         }
 
-        _exec_env->load_stream_mgr()->remove(id);
+        _exec_env->new_load_stream_mgr()->remove(id);
     }
 
     std::string to_json() const;
@@ -114,7 +115,7 @@ public:
     bool unref() { return _refs.fetch_sub(1) == 1; }
 
 public:
-    // load type, eg: ROUTINE LOAD/MANUL LOAD
+    // load type, eg: ROUTINE LOAD/MANUAL LOAD
     TLoadType::type load_type;
     // load data source: eg: KAFKA/RAW
     TLoadSourceType::type load_src_type;
@@ -161,6 +162,7 @@ public:
     // otherwise we save source data to file first, then process it.
     bool use_streaming = false;
     TFileFormatType::type format = TFileFormatType::FORMAT_CSV_PLAIN;
+    TFileCompressType::type compress_type = TFileCompressType::UNKNOWN;
 
     std::shared_ptr<MessageBodySink> body_sink;
 
@@ -199,7 +201,7 @@ public:
     // to identified a specified data consumer.
     int64_t consumer_id;
 
-    // If this is an tranactional insert operation, this will be true
+    // If this is an transactional insert operation, this will be true
     bool need_commit_self = false;
 
     // csv with header type

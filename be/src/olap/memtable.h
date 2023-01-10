@@ -44,14 +44,15 @@ public:
     MemTable(TabletSharedPtr tablet, Schema* schema, const TabletSchema* tablet_schema,
              const std::vector<SlotDescriptor*>* slot_descs, TupleDescriptor* tuple_desc,
              RowsetWriter* rowset_writer, DeleteBitmapPtr delete_bitmap,
-             const RowsetIdUnorderedSet& rowset_ids, bool support_vec = false);
+             const RowsetIdUnorderedSet& rowset_ids, int64_t cur_max_version,
+             const std::shared_ptr<MemTracker>& insert_mem_tracker,
+             const std::shared_ptr<MemTracker>& flush_mem_tracker);
     ~MemTable();
 
     int64_t tablet_id() const { return _tablet->tablet_id(); }
-    KeysType keys_type() const { return _tablet->keys_type(); }
-    size_t memory_usage() const { return _mem_tracker->consumption(); }
-
-    inline void insert(const Tuple* tuple) { (this->*_insert_fn)(tuple); }
+    size_t memory_usage() const {
+        return _insert_mem_tracker->consumption() + _flush_mem_tracker->consumption();
+    }
     // insert tuple from (row_pos) to (row_pos+num_rows)
     void insert(const vectorized::Block* block, const std::vector<int>& row_idxs);
 
@@ -66,18 +67,10 @@ public:
     Status close();
 
     int64_t flush_size() const { return _flush_size; }
+    int64_t merged_rows() const { return _merged_rows; }
 
 private:
     Status _do_flush(int64_t& duration_ns);
-
-    class RowCursorComparator : public RowComparator {
-    public:
-        RowCursorComparator(const Schema* schema);
-        int operator()(const char* left, const char* right) const override;
-
-    private:
-        const Schema* _schema;
-    };
 
     // row pos in _input_mutable_block
     struct RowInBlock {
@@ -110,53 +103,37 @@ private:
     };
 
 private:
-    using Table = SkipList<char*, RowComparator>;
-    using TableKey = Table::key_type;
     using VecTable = SkipList<RowInBlock*, RowInBlockComparator>;
 
-public:
-    /// The iterator of memtable, so that the data in this memtable
-    /// can be visited outside.
-    class Iterator {
-    public:
-        Iterator(MemTable* mem_table);
-        ~Iterator() = default;
-
-        void seek_to_first();
-        bool valid();
-        void next();
-        ContiguousRow get_current_row();
-
-    private:
-        MemTable* _mem_table;
-        Table::Iterator _it;
-    };
-
 private:
-    void _tuple_to_row(const Tuple* tuple, ContiguousRow* row, MemPool* mem_pool);
-    void _aggregate_two_row(const ContiguousRow& new_row, TableKey row_in_skiplist);
-    void _replace_row(const ContiguousRow& src_row, TableKey row_in_skiplist);
-    void _insert_dup(const Tuple* tuple);
-    void _insert_agg(const Tuple* tuple);
     // for vectorized
     void _insert_one_row_from_block(RowInBlock* row_in_block);
     void _aggregate_two_row_in_block(RowInBlock* new_row, RowInBlock* row_in_skiplist);
 
-    Status _generate_delete_bitmap();
+    Status _generate_delete_bitmap(int64_t atomic_num_segments_before_flush,
+                                   int64_t atomic_num_segments_after_flush);
 
 private:
     TabletSharedPtr _tablet;
+    const KeysType _keys_type;
     Schema* _schema;
     const TabletSchema* _tablet_schema;
-    // the slot in _slot_descs are in order of tablet's schema
-    const std::vector<SlotDescriptor*>* _slot_descs;
 
     // TODO: change to unique_ptr of comparator
     std::shared_ptr<RowComparator> _row_comparator;
 
     std::shared_ptr<RowInBlockComparator> _vec_row_comparator;
 
-    std::unique_ptr<MemTracker> _mem_tracker;
+    // `_insert_manual_mem_tracker` manually records the memory value of memtable insert()
+    // `_flush_hook_mem_tracker` automatically records the memory value of memtable flush() through mem hook.
+    // Is used to flush when _insert_manual_mem_tracker larger than write_buffer_size and run flush memtable
+    // when the sum of all memtable (_insert_manual_mem_tracker + _flush_hook_mem_tracker) exceeds the limit.
+    std::shared_ptr<MemTracker> _insert_mem_tracker;
+    std::shared_ptr<MemTracker> _flush_mem_tracker;
+    // It is only used for verification when the value of `_insert_manual_mem_tracker` is suspected to be wrong.
+    // The memory value automatically tracked by the mem hook is 20% less than the manually recorded
+    // value in the memtable, because some freed memory is not allocated in the DeltaWriter.
+    std::unique_ptr<MemTracker> _insert_mem_tracker_use_hook;
     // This is a buffer, to hold the memory referenced by the rows that have not
     // been inserted into the SkipList
     std::unique_ptr<MemPool> _buffer_mem_pool;
@@ -171,8 +148,6 @@ private:
     ObjectPool _agg_object_pool;
 
     size_t _schema_size;
-    std::unique_ptr<Table> _skip_list;
-    Table::Hint _hint;
 
     std::unique_ptr<VecTable> _vec_skip_list;
     VecTable::Hint _vec_hint;
@@ -186,11 +161,9 @@ private:
     int64_t _flush_size = 0;
     // Number of rows inserted to this memtable.
     // This is not the rows in this memtable, because rows may be merged
-    // in unique or aggragate key model.
+    // in unique or aggregate key model.
     int64_t _rows = 0;
-    void (MemTable::*_insert_fn)(const Tuple* tuple) = nullptr;
-    void (MemTable::*_aggregate_two_row_fn)(const ContiguousRow& new_row,
-                                            TableKey row_in_skiplist) = nullptr;
+    int64_t _merged_rows = 0;
 
     //for vectorized
     vectorized::MutableBlock _input_mutable_block;
@@ -210,6 +183,7 @@ private:
 
     DeleteBitmapPtr _delete_bitmap;
     RowsetIdUnorderedSet _rowset_ids;
+    int64_t _cur_max_version;
 }; // class MemTable
 
 inline std::ostream& operator<<(std::ostream& os, const MemTable& table) {

@@ -27,8 +27,10 @@ import org.apache.doris.nereids.trees.plans.PlanType;
 import org.apache.doris.nereids.trees.plans.algebra.Project;
 import org.apache.doris.nereids.trees.plans.visitor.PlanVisitor;
 import org.apache.doris.nereids.util.Utils;
+import org.apache.doris.statistics.StatsDeriveResult;
 
 import com.google.common.base.Preconditions;
+import com.google.common.collect.ImmutableList;
 
 import java.util.List;
 import java.util.Objects;
@@ -39,7 +41,7 @@ import java.util.Optional;
  */
 public class PhysicalProject<CHILD_TYPE extends Plan> extends PhysicalUnary<CHILD_TYPE> implements Project {
 
-    private final List<NamedExpression> projects;
+    private final ImmutableList<NamedExpression> projects;
 
     public PhysicalProject(List<NamedExpression> projects, LogicalProperties logicalProperties, CHILD_TYPE child) {
         this(projects, Optional.empty(), logicalProperties, child);
@@ -48,13 +50,15 @@ public class PhysicalProject<CHILD_TYPE extends Plan> extends PhysicalUnary<CHIL
     public PhysicalProject(List<NamedExpression> projects, Optional<GroupExpression> groupExpression,
             LogicalProperties logicalProperties, CHILD_TYPE child) {
         super(PlanType.PHYSICAL_PROJECT, groupExpression, logicalProperties, child);
-        this.projects = Objects.requireNonNull(projects, "projects can not be null");
+        this.projects = ImmutableList.copyOf(Objects.requireNonNull(projects, "projects can not be null"));
     }
 
     public PhysicalProject(List<NamedExpression> projects, Optional<GroupExpression> groupExpression,
-            LogicalProperties logicalProperties, PhysicalProperties physicalProperties, CHILD_TYPE child) {
-        super(PlanType.PHYSICAL_PROJECT, groupExpression, logicalProperties, physicalProperties, child);
-        this.projects = Objects.requireNonNull(projects, "projects can not be null");
+            LogicalProperties logicalProperties, PhysicalProperties physicalProperties,
+            StatsDeriveResult statsDeriveResult, CHILD_TYPE child) {
+        super(PlanType.PHYSICAL_PROJECT, groupExpression, logicalProperties, physicalProperties, statsDeriveResult,
+                child);
+        this.projects = ImmutableList.copyOf(Objects.requireNonNull(projects, "projects can not be null"));
     }
 
     public List<NamedExpression> getProjects() {
@@ -64,7 +68,8 @@ public class PhysicalProject<CHILD_TYPE extends Plan> extends PhysicalUnary<CHIL
     @Override
     public String toString() {
         return Utils.toSqlString("PhysicalProject",
-                "projects", projects
+                "projects", projects,
+                "stats", statsDeriveResult
         );
     }
 
@@ -112,7 +117,25 @@ public class PhysicalProject<CHILD_TYPE extends Plan> extends PhysicalUnary<CHIL
     }
 
     @Override
-    public PhysicalProject<CHILD_TYPE> withPhysicalProperties(PhysicalProperties physicalProperties) {
-        return new PhysicalProject<>(projects, Optional.empty(), getLogicalProperties(), physicalProperties, child());
+    public PhysicalProject<CHILD_TYPE> withPhysicalPropertiesAndStats(PhysicalProperties physicalProperties,
+            StatsDeriveResult statsDeriveResult) {
+        return new PhysicalProject<>(projects, Optional.empty(), getLogicalProperties(), physicalProperties,
+                statsDeriveResult, child());
+    }
+
+    /**
+     * replace projections and child, it is used for merge consecutive projections.
+     * @param projections new projections
+     * @param child new child
+     * @return new project
+     */
+    public PhysicalProject<Plan> withProjectionsAndChild(List<NamedExpression> projections, Plan child) {
+        return new PhysicalProject<Plan>(ImmutableList.copyOf(projections),
+                groupExpression,
+                getLogicalProperties(),
+                physicalProperties,
+                statsDeriveResult,
+                child
+                );
     }
 }

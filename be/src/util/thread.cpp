@@ -20,7 +20,14 @@
 
 #include "thread.h"
 
+#ifndef __APPLE__
 #include <sys/prctl.h>
+#else
+#include <pthread.h>
+
+#include <cstdint>
+#endif
+
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -35,7 +42,6 @@
 #include "gutil/atomicops.h"
 #include "gutil/dynamic_annotations.h"
 #include "gutil/map-util.h"
-#include "gutil/once.h"
 #include "gutil/strings/substitute.h"
 #include "olap/olap_define.h"
 #include "util/debug/sanitizer_scopes.h"
@@ -58,7 +64,7 @@ __thread Thread* Thread::_tls = nullptr;
 static std::shared_ptr<ThreadMgr> thread_manager;
 //
 // Controls the single (lazy) initialization of thread_manager.
-static GoogleOnceType once = GOOGLE_ONCE_INIT;
+static std::once_flag once;
 
 // A singleton class that tracks all live threads, and groups them together for easy
 // auditing. Used only by Thread.
@@ -73,7 +79,9 @@ public:
 
     static void set_thread_name(const std::string& name, int64_t tid);
 
+#ifndef __APPLE__
     static void set_idle_sched(int64_t tid);
+#endif
 
     // not the system TID, since pthread_t is less prone to being recycled.
     void add_thread(const pthread_t& pthread_id, const std::string& name,
@@ -133,12 +141,17 @@ void ThreadMgr::set_thread_name(const std::string& name, int64_t tid) {
     if (tid == getpid()) {
         return;
     }
+#ifdef __APPLE__
+    int err = pthread_setname_np(name.c_str());
+#else
     int err = prctl(PR_SET_NAME, name.c_str());
+#endif
     if (err < 0 && errno != EPERM) {
         LOG(ERROR) << "set_thread_name";
     }
 }
 
+#ifndef __APPLE__
 void ThreadMgr::set_idle_sched(int64_t tid) {
     if (tid == getpid()) {
         return;
@@ -149,6 +162,7 @@ void ThreadMgr::set_idle_sched(int64_t tid) {
         LOG(ERROR) << "set_thread_idle_sched";
     }
 }
+#endif
 
 void ThreadMgr::add_thread(const pthread_t& pthread_id, const std::string& name,
                            const std::string& category, int64_t tid) {
@@ -225,7 +239,7 @@ void ThreadMgr::display_thread_callback(const WebPageHandler::ArgumentMap& args,
         }
     } else {
         // List all thread groups and the number of threads running in each.
-        std::vector<pair<string, uint64_t>> thread_categories_info;
+        std::vector<std::pair<string, uint64_t>> thread_categories_info;
         uint64_t running;
         {
             std::unique_lock<std::mutex> l(_lock);
@@ -275,9 +289,11 @@ void Thread::set_self_name(const std::string& name) {
     ThreadMgr::set_thread_name(name, current_thread_id());
 }
 
+#ifndef __APPLE__
 void Thread::set_idle_sched() {
     ThreadMgr::set_idle_sched(current_thread_id());
 }
+#endif
 
 void Thread::join() {
     ThreadJoiner(this).join();
@@ -313,11 +329,23 @@ Thread* Thread::current_thread() {
 }
 
 int64_t Thread::unique_thread_id() {
+#ifdef __APPLE__
+    uint64_t tid;
+    pthread_threadid_np(pthread_self(), &tid);
+    return tid;
+#else
     return static_cast<int64_t>(pthread_self());
+#endif
 }
 
 int64_t Thread::current_thread_id() {
+#ifdef __APPLE__
+    uint64_t tid;
+    pthread_threadid_np(nullptr, &tid);
+    return tid;
+#else
     return syscall(SYS_gettid);
+#endif
 }
 
 int64_t Thread::wait_for_tid() const {
@@ -349,7 +377,7 @@ int64_t Thread::wait_for_tid() const {
 Status Thread::start_thread(const std::string& category, const std::string& name,
                             const ThreadFunctor& functor, uint64_t flags,
                             scoped_refptr<Thread>* holder) {
-    GoogleOnceInit(&once, &init_threadmgr);
+    std::call_once(once, init_threadmgr);
 
     // Temporary reference for the duration of this function.
     scoped_refptr<Thread> t(new Thread(category, name, functor));

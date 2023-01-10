@@ -26,17 +26,35 @@
 #include "vec/core/block.h"
 #include "vec/exec/scan/vscanner.h"
 #include "vec/exprs/vexpr.h"
+#include "vfile_scanner.h"
 
 namespace doris::vectorized {
 
 ScannerScheduler::ScannerScheduler() {}
 
 ScannerScheduler::~ScannerScheduler() {
+    if (!_is_init) {
+        return;
+    }
+
+    for (int i = 0; i < QUEUE_NUM; i++) {
+        _pending_queues[i]->shutdown();
+    }
+
     _is_closed = true;
+
     _scheduler_pool->shutdown();
     _local_scan_thread_pool->shutdown();
     _remote_scan_thread_pool->shutdown();
-    // TODO: safely delete all objects and graceful exit
+
+    _scheduler_pool->wait();
+    _local_scan_thread_pool->join();
+    _remote_scan_thread_pool->join();
+
+    for (int i = 0; i < QUEUE_NUM; i++) {
+        delete _pending_queues[i];
+    }
+    delete[] _pending_queues;
 }
 
 Status ScannerScheduler::init(ExecEnv* env) {
@@ -53,14 +71,16 @@ Status ScannerScheduler::init(ExecEnv* env) {
     }
 
     // 2. local scan thread pool
-    _local_scan_thread_pool = new PriorityWorkStealingThreadPool(
+    _local_scan_thread_pool.reset(new PriorityWorkStealingThreadPool(
             config::doris_scanner_thread_pool_thread_num, env->store_paths().size(),
-            config::doris_scanner_thread_pool_queue_size);
+            config::doris_scanner_thread_pool_queue_size, "local_scan"));
 
     // 3. remote scan thread pool
-    _remote_scan_thread_pool = new PriorityThreadPool(config::doris_scanner_thread_pool_thread_num,
-                                                      config::doris_scanner_thread_pool_queue_size);
+    _remote_scan_thread_pool.reset(
+            new PriorityThreadPool(config::doris_scanner_thread_pool_thread_num,
+                                   config::doris_scanner_thread_pool_queue_size, "remote_scan"));
 
+    _is_init = true;
     return Status::OK();
 }
 
@@ -115,17 +135,13 @@ void ScannerScheduler::_schedule_scanners(ScannerContext* ctx) {
     // Submit scanners to thread pool
     // TODO(cmy): How to handle this "nice"?
     int nice = 1;
-    auto cur_span = opentelemetry::trace::Tracer::GetCurrentSpan();
     auto iter = this_run.begin();
     ctx->incr_num_scanner_scheduling(this_run.size());
     if (ctx->thread_token != nullptr) {
         while (iter != this_run.end()) {
             (*iter)->start_wait_worker_timer();
             auto s = ctx->thread_token->submit_func(
-                    [this, scanner = *iter, parent_span = cur_span, ctx] {
-                        opentelemetry::trace::Scope scope {parent_span};
-                        this->_scanner_scan(this, ctx, scanner);
-                    });
+                    [this, scanner = *iter, ctx] { this->_scanner_scan(this, ctx, scanner); });
             if (s.ok()) {
                 this_run.erase(iter++);
             } else {
@@ -136,8 +152,7 @@ void ScannerScheduler::_schedule_scanners(ScannerContext* ctx) {
     } else {
         while (iter != this_run.end()) {
             PriorityThreadPool::Task task;
-            task.work_function = [this, scanner = *iter, parent_span = cur_span, ctx] {
-                opentelemetry::trace::Scope scope {parent_span};
+            task.work_function = [this, scanner = *iter, ctx] {
                 this->_scanner_scan(this, ctx, scanner);
             };
             task.priority = nice;
@@ -164,16 +179,11 @@ void ScannerScheduler::_schedule_scanners(ScannerContext* ctx) {
 
 void ScannerScheduler::_scanner_scan(ScannerScheduler* scheduler, ScannerContext* ctx,
                                      VScanner* scanner) {
-    INIT_AND_SCOPE_REENTRANT_SPAN_IF(ctx->state()->enable_profile(), ctx->state()->get_tracer(),
-                                     ctx->scan_span(), "VScanner::scan");
     SCOPED_ATTACH_TASK(scanner->runtime_state());
-
+    SCOPED_CONSUME_MEM_TRACKER(scanner->runtime_state()->scanner_mem_tracker());
     Thread::set_self_name("_scanner_scan");
     scanner->update_wait_worker_timer();
-    // Do not use ScopedTimer. There is no guarantee that, the counter
-    // (_scan_cpu_timer, the class member) is not destroyed after `_running_thread==0`.
-    ThreadCpuStopWatch cpu_watch;
-    cpu_watch.start();
+    scanner->start_scan_cpu_timer();
     Status status = Status::OK();
     bool eos = false;
     RuntimeState* state = ctx->state();
@@ -223,11 +233,23 @@ void ScannerScheduler::_scanner_scan(ScannerScheduler* scheduler, ScannerContext
         auto block = ctx->get_free_block(&get_free_block);
         status = scanner->get_block(state, block, &eos);
         VLOG_ROW << "VOlapScanNode input rows: " << block->rows() << ", eos: " << eos;
-        if (!status.ok()) {
+        // The VFileScanner for external table may try to open not exist files,
+        // Because FE file cache for external table may out of date.
+        // So, NOT_FOUND for VFileScanner is not a fail case.
+        // Will remove this after file reader refactor.
+        if (!status.ok() && (typeid(*scanner) != typeid(doris::vectorized::VFileScanner) ||
+                             (typeid(*scanner) == typeid(doris::vectorized::VFileScanner) &&
+                              !status.is<ErrorCode::NOT_FOUND>()))) {
             LOG(WARNING) << "Scan thread read VOlapScanner failed: " << status.to_string();
             // Add block ptr in blocks, prevent mem leak in read failed
             blocks.push_back(block);
             break;
+        }
+        if (status.is<ErrorCode::NOT_FOUND>()) {
+            // The only case in this if branch is external table file delete and fe cache has not been updated yet.
+            // Set status to OK.
+            status = Status::OK();
+            eos = true;
         }
 
         raw_bytes_read += block->bytes();
@@ -258,6 +280,7 @@ void ScannerScheduler::_scanner_scan(ScannerScheduler* scheduler, ScannerContext
         ctx->append_blocks_to_queue(blocks);
     }
 
+    scanner->update_scan_cpu_timer();
     if (eos || should_stop) {
         scanner->mark_to_need_to_close();
     }

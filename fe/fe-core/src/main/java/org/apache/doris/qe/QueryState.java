@@ -29,7 +29,8 @@ public class QueryState {
         NOOP,   // send nothing to remote
         OK,     // send OK packet to remote
         EOF,    // send EOF packet to remote
-        ERR     // send ERROR packet to remote
+        ERR,     // send ERROR packet to remote
+        UNKNOWN  // send UNKNOWN packet to remote
     }
 
     public enum ErrType {
@@ -55,6 +56,7 @@ public class QueryState {
         stateType = MysqlStateType.OK;
         errorCode = null;
         infoMessage = null;
+        errorMessage = "";
         serverStatus = 0;
         isQuery = false;
         affectedRows = 0;

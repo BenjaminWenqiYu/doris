@@ -24,8 +24,10 @@
 #include "http/action/config_action.h"
 #include "http/action/download_action.h"
 #include "http/action/health_action.h"
+#include "http/action/jeprofile_actions.h"
 #include "http/action/meta_action.h"
 #include "http/action/metrics_action.h"
+#include "http/action/pad_rowset_action.h"
 #include "http/action/pprof_actions.h"
 #include "http/action/reload_tablet_action.h"
 #include "http/action/reset_rpc_channel_action.h"
@@ -36,6 +38,7 @@
 #include "http/action/tablet_migration_action.h"
 #include "http/action/tablets_distribution_action.h"
 #include "http/action/tablets_info_action.h"
+#include "http/action/version_action.h"
 #include "http/default_path_handlers.h"
 #include "http/ev_http_server.h"
 #include "http/http_method.h"
@@ -65,6 +68,8 @@ Status HttpService::start() {
     StreamLoad2PCAction* streamload_2pc_action = _pool.add(new StreamLoad2PCAction(_env));
     _ev_http_server->register_handler(HttpMethod::PUT, "/api/{db}/_stream_load_2pc",
                                       streamload_2pc_action);
+    _ev_http_server->register_handler(HttpMethod::PUT, "/api/{db}/{table}/_stream_load_2pc",
+                                      streamload_2pc_action);
 
     // register download action
     std::vector<std::string> allow_paths;
@@ -88,6 +93,10 @@ Status HttpService::start() {
     _ev_http_server->register_handler(HttpMethod::HEAD, "/api/_load_error_log",
                                       error_log_download_action);
 
+    // Register BE version action
+    VersionAction* version_action = _pool.add(new VersionAction());
+    _ev_http_server->register_handler(HttpMethod::GET, "/api/be_version_info", version_action);
+
     // Register BE health action
     HealthAction* health_action = _pool.add(new HealthAction());
     _ev_http_server->register_handler(HttpMethod::GET, "/api/health", health_action);
@@ -109,6 +118,9 @@ Status HttpService::start() {
 
     // register pprof actions
     PprofActions::setup(_env, _ev_http_server.get(), _pool);
+
+    // register jeprof actions
+    JeprofileActions::setup(_env, _ev_http_server.get(), _pool);
 
     // register metrics
     {
@@ -172,6 +184,9 @@ Status HttpService::start() {
             _pool.add(new CheckTabletSegmentAction());
     _ev_http_server->register_handler(HttpMethod::POST, "/api/check_tablet_segment_lost",
                                       check_tablet_segment_action);
+
+    PadRowsetAction* pad_rowset_action = _pool.add(new PadRowsetAction());
+    _ev_http_server->register_handler(HttpMethod::POST, "api/pad_rowset", pad_rowset_action);
 
     _ev_http_server->start();
     return Status::OK();

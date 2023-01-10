@@ -18,6 +18,7 @@
 package org.apache.doris.analysis;
 
 import org.apache.doris.analysis.ColumnDef.DefaultValue;
+import org.apache.doris.analysis.MVRefreshInfo.BuildMode;
 import org.apache.doris.catalog.Column;
 import org.apache.doris.catalog.Database;
 import org.apache.doris.catalog.Env;
@@ -38,17 +39,17 @@ import java.util.stream.Collectors;
 
 public class CreateMultiTableMaterializedViewStmt extends CreateTableStmt {
     private final String mvName;
-    private final MVRefreshInfo.BuildMode buildMethod;
+    private final MVRefreshInfo.BuildMode buildMode;
     private final MVRefreshInfo refreshInfo;
     private final QueryStmt queryStmt;
     private Database database;
     private final Map<String, OlapTable> olapTables = Maps.newHashMap();
 
-    public CreateMultiTableMaterializedViewStmt(String mvName, MVRefreshInfo.BuildMode buildMethod,
+    public CreateMultiTableMaterializedViewStmt(String mvName, MVRefreshInfo.BuildMode buildMode,
             MVRefreshInfo refreshInfo, KeysDesc keyDesc, PartitionDesc partitionDesc, DistributionDesc distributionDesc,
             Map<String, String> properties, QueryStmt queryStmt) {
         this.mvName = mvName;
-        this.buildMethod = buildMethod;
+        this.buildMode = buildMode;
         this.refreshInfo = refreshInfo;
         this.queryStmt = queryStmt;
 
@@ -66,6 +67,9 @@ public class CreateMultiTableMaterializedViewStmt extends CreateTableStmt {
             analyzeSelectClause((SelectStmt) queryStmt);
         }
         tableName = new TableName(null, database.getFullName(), mvName);
+        if (partitionDesc != null) {
+            ((ColumnPartitionDesc) partitionDesc).analyze(analyzer, this);
+        }
         super.analyze(analyzer);
     }
 
@@ -91,7 +95,7 @@ public class CreateMultiTableMaterializedViewStmt extends CreateTableStmt {
                         column.getName(),
                         new TypeDef(column.getType()),
                         column.isKey(),
-                        column.getAggregationType(),
+                        null,
                         column.isAllowNull(),
                         new DefaultValue(column.getDefaultValue() != null, column.getDefaultValue()),
                         column.getComment())
@@ -142,7 +146,7 @@ public class CreateMultiTableMaterializedViewStmt extends CreateTableStmt {
     @Override
     public String toSql() {
         StringBuilder sb = new StringBuilder();
-        sb.append("CREATE MATERIALIZED VIEW ").append(mvName).append(" BUILD ON ").append(buildMethod.toString());
+        sb.append("CREATE MATERIALIZED VIEW ").append(mvName).append(" BUILD ").append(buildMode.toString());
         if (refreshInfo != null) {
             sb.append(" ").append(refreshInfo.toString());
         }
@@ -179,5 +183,9 @@ public class CreateMultiTableMaterializedViewStmt extends CreateTableStmt {
 
     public QueryStmt getQueryStmt() {
         return queryStmt;
+    }
+
+    public BuildMode getBuildMode() {
+        return buildMode;
     }
 }

@@ -14,9 +14,10 @@
 #include <limits.h> // for enumeration casts and tests
 #include <string.h> // for memcpy
 
+#include <type_traits>
+
 #include "gutil/macros.h"
 #include "gutil/template_util.h"
-#include "gutil/type_traits.h"
 
 // Use implicit_cast as a safe version of static_cast or const_cast
 // for implicit conversions. For example:
@@ -89,8 +90,8 @@ inline To down_cast(From* f) {        // so we only accept pointers
 // compiler will just bind From to const T.
 template <typename To, typename From>
 inline To down_cast(From& f) {
-    COMPILE_ASSERT(base::is_reference<To>::value, target_type_not_a_reference);
-    typedef typename base::remove_reference<To>::type* ToAsPointer;
+    COMPILE_ASSERT(std::is_reference<To>::value, target_type_not_a_reference);
+    using ToAsPointer = typename std::remove_reference<To>::type*;
     if (false) {
         // Compile-time check that To inherits from From. See above for details.
         ::implicit_cast<From*, ToAsPointer>(NULL);
@@ -123,7 +124,7 @@ inline To down_cast(From& f) {
 //
 // This is true for any cast syntax, either *(int*)&f or
 // *reinterpret_cast<int*>(&f).  And it is particularly true for
-// conversions betweeen integral lvalues and floating-point lvalues.
+// conversions between integral lvalues and floating-point lvalues.
 //
 // The purpose of 3.10 -15- is to allow optimizing compilers to assume
 // that expressions with different types refer to different memory.  gcc
@@ -184,7 +185,7 @@ inline Dest bit_cast(const Source& source) {
 //   enum A { A_min = -18, A_max = 33 };
 //   MAKE_ENUM_LIMITS(A, A_min, A_max)
 //
-// Convert an enum to an int in one of two ways.  The prefered way is a
+// Convert an enum to an int in one of two ways.  The preferred way is a
 // tight conversion, which ensures that A_min <= value <= A_max.
 //
 //   A var = tight_enum_cast<A>(3);

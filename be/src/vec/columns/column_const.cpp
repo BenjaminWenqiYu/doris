@@ -36,7 +36,8 @@ ColumnConst::ColumnConst(const ColumnPtr& data_, size_t s_) : data(data_), s(s_)
 
     if (data->size() != 1) {
         LOG(FATAL) << fmt::format(
-                "Incorrect size of nested column in constructor of ColumnConst: {}, must be 1.");
+                "Incorrect size of nested column in constructor of ColumnConst: {}, must be 1.",
+                data->size());
     }
 }
 
@@ -67,7 +68,8 @@ ColumnPtr ColumnConst::replicate(const Offsets& offsets) const {
     return ColumnConst::create(data, replicated_size);
 }
 
-void ColumnConst::replicate(const uint32_t* counts, size_t target_size, IColumn& column) const {
+void ColumnConst::replicate(const uint32_t* counts, size_t target_size, IColumn& column,
+                            size_t begin, int count_sz) const {
     if (s == 0) return;
     auto& res = reinterpret_cast<ColumnConst&>(column);
     res.s = s;

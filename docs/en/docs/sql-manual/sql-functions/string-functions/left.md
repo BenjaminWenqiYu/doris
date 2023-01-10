@@ -28,7 +28,7 @@ under the License.
 ### Description
 #### Syntax
 
-`VARCHAR left (VARCHAR str)`
+`VARCHAR left (VARCHAR str, INT len)`
 
 
 It returns the left part of a string of specified length, length is char length not the byte size.
@@ -44,4 +44,4 @@ mysql> select left("Hello doris",5);
 +------------------------+
 ```
 ### keywords
-LEFT
+    LEFT

@@ -18,21 +18,19 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
+#include <map>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
 #include "gen_cpp/PaloInternalService_types.h"
 #include "gen_cpp/Types_types.h"
 #include "gen_cpp/internal_service.pb.h"
-#include "gutil/strings/substitute.h"
 #include "runtime/descriptors.h"
-#include "runtime/memory/mem_tracker.h"
-#include "runtime/thread_context.h"
 #include "util/bitmap.h"
-#include "util/priority_thread_pool.hpp"
 #include "util/uid_util.h"
-#include "vec/core/block.h"
 
 namespace doris {
 
@@ -60,9 +58,7 @@ class LoadChannel;
 // Write channel for a particular (load, index).
 class TabletsChannel {
 public:
-    TabletsChannel(const TabletsChannelKey& key,
-                   const std::shared_ptr<MemTrackerLimiter>& parent_tracker, bool is_high_priority,
-                   bool is_vec);
+    TabletsChannel(const TabletsChannelKey& key, const UniqueId& load_id, bool is_high_priority);
 
     ~TabletsChannel();
 
@@ -88,13 +84,16 @@ public:
     // no-op when this channel has been closed or cancelled
     Status cancel();
 
-    // upper application may call this to try to reduce the mem usage of this channel.
-    // eg. flush the largest memtable immediately.
-    // return Status::OK if mem is reduced.
-    // no-op when this channel has been closed or cancelled
-    Status reduce_mem_usage(int64_t mem_limit);
+    int64_t mem_consumption();
 
-    int64_t mem_consumption() const { return _mem_tracker->consumption(); }
+    void get_writers_mem_consumption_snapshot(
+            std::multimap<int64_t, int64_t, std::greater<int64_t>>* mem_consumptions) {
+        std::lock_guard<SpinLock> l(_tablet_writers_lock);
+        *mem_consumptions = _mem_consumptions;
+    }
+
+    void flush_memtable_async(int64_t tablet_id);
+    void wait_flush(int64_t tablet_id);
 
 private:
     template <typename Request>
@@ -102,6 +101,8 @@ private:
 
     // open all writer
     Status _open_all_writers(const PTabletWriterOpenRequest& request);
+
+    bool _try_to_wait_flushing();
 
     // deal with DeltaWriter close_wait(), add tablet to list for return.
     void _close_wait(DeltaWriter* writer,
@@ -115,12 +116,16 @@ private:
     // make execute sequence
     std::mutex _lock;
 
+    SpinLock _tablet_writers_lock;
+
     enum State {
         kInitialized,
         kOpened,
         kFinished // closed or cancelled
     };
     State _state;
+
+    UniqueId _load_id;
 
     // initialized in open function
     int64_t _txn_id = -1;
@@ -146,17 +151,19 @@ private:
     // So that following batch will not handle this tablet anymore.
     std::unordered_set<int64_t> _broken_tablets;
 
+    std::unordered_set<int64_t> _reducing_tablets;
+
     std::unordered_set<int64_t> _partition_ids;
 
     static std::atomic<uint64_t> _s_tablet_writer_count;
 
-    std::shared_ptr<MemTrackerLimiter> _mem_tracker;
-
     bool _is_high_priority = false;
 
-    bool _is_vec = false;
-
     bool _write_single_replica = false;
+
+    // mem -> tablet_id
+    // sort by memory size
+    std::multimap<int64_t, int64_t, std::greater<int64_t>> _mem_consumptions;
 };
 
 template <typename Request>

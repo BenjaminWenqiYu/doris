@@ -22,6 +22,7 @@ import org.apache.doris.nereids.properties.LogicalProperties;
 import org.apache.doris.nereids.rules.exploration.join.JoinReorderContext;
 import org.apache.doris.nereids.trees.expressions.Expression;
 import org.apache.doris.nereids.trees.expressions.Slot;
+import org.apache.doris.nereids.trees.plans.JoinHint;
 import org.apache.doris.nereids.trees.plans.JoinType;
 import org.apache.doris.nereids.trees.plans.Plan;
 import org.apache.doris.nereids.trees.plans.PlanType;
@@ -33,6 +34,7 @@ import org.apache.doris.nereids.util.Utils;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableList.Builder;
+import com.google.common.collect.Lists;
 
 import java.util.List;
 import java.util.Objects;
@@ -44,10 +46,10 @@ import java.util.stream.Collectors;
  */
 public class LogicalJoin<LEFT_CHILD_TYPE extends Plan, RIGHT_CHILD_TYPE extends Plan>
         extends LogicalBinary<LEFT_CHILD_TYPE, RIGHT_CHILD_TYPE> implements Join {
-
     private final JoinType joinType;
-    private final Optional<Expression> otherJoinCondition;
-    private final List<Expression> hashJoinConjuncts;
+    private final ImmutableList<Expression> otherJoinConjuncts;
+    private final ImmutableList<Expression> hashJoinConjuncts;
+    private final JoinHint hint;
 
     // Use for top-to-down join reorder
     private final JoinReorderContext joinReorderContext = new JoinReorderContext();
@@ -58,28 +60,62 @@ public class LogicalJoin<LEFT_CHILD_TYPE extends Plan, RIGHT_CHILD_TYPE extends 
      * @param joinType logical type for join
      */
     public LogicalJoin(JoinType joinType, LEFT_CHILD_TYPE leftChild, RIGHT_CHILD_TYPE rightChild) {
-        this(joinType, ImmutableList.of(),
-                Optional.empty(), Optional.empty(),
+        this(joinType, ExpressionUtils.EMPTY_CONDITION, ExpressionUtils.EMPTY_CONDITION, JoinHint.NONE,
+                Optional.empty(), Optional.empty(), leftChild, rightChild);
+    }
+
+    public LogicalJoin(JoinType joinType, List<Expression> hashJoinConjuncts, LEFT_CHILD_TYPE leftChild,
+            RIGHT_CHILD_TYPE rightChild) {
+        this(joinType, hashJoinConjuncts, ExpressionUtils.EMPTY_CONDITION, JoinHint.NONE, Optional.empty(),
                 Optional.empty(), leftChild, rightChild);
     }
 
-    public LogicalJoin(JoinType joinType, List<Expression> hashJoinConjuncts, Optional<Expression> otherJoinCondition,
+    public LogicalJoin(
+            JoinType joinType,
+            List<Expression> hashJoinConjuncts,
+            List<Expression> otherJoinConjuncts,
+            JoinHint hint,
             LEFT_CHILD_TYPE leftChild, RIGHT_CHILD_TYPE rightChild) {
         this(joinType, hashJoinConjuncts,
-                otherJoinCondition, Optional.empty(), Optional.empty(), leftChild, rightChild);
+                otherJoinConjuncts, hint, Optional.empty(), Optional.empty(), leftChild, rightChild);
     }
 
-    public LogicalJoin(JoinType joinType, List<Expression> hashJoinConjuncts, Optional<Expression> otherJoinCondition,
-            LEFT_CHILD_TYPE leftChild, RIGHT_CHILD_TYPE rightChild, JoinReorderContext joinReorderContext) {
-        this(joinType, hashJoinConjuncts, otherJoinCondition,
+    public LogicalJoin(
+            JoinType joinType,
+            List<Expression> hashJoinConjuncts,
+            JoinHint hint,
+            LEFT_CHILD_TYPE leftChild,
+            RIGHT_CHILD_TYPE rightChild,
+            JoinReorderContext joinReorderContext) {
+        this(joinType, hashJoinConjuncts, ExpressionUtils.EMPTY_CONDITION, hint,
                 Optional.empty(), Optional.empty(), leftChild, rightChild);
         this.joinReorderContext.copyFrom(joinReorderContext);
     }
 
-    public LogicalJoin(JoinType joinType, List<Expression> hashJoinConjuncts, Optional<Expression> otherJoinCondition,
-            Optional<GroupExpression> groupExpression, Optional<LogicalProperties> logicalProperties,
-            LEFT_CHILD_TYPE leftChild, RIGHT_CHILD_TYPE rightChild, JoinReorderContext joinReorderContext) {
-        this(joinType, hashJoinConjuncts, otherJoinCondition, groupExpression, logicalProperties, leftChild,
+    public LogicalJoin(
+            JoinType joinType,
+            List<Expression> hashJoinConjuncts,
+            List<Expression> otherJoinConjuncts,
+            JoinHint hint,
+            LEFT_CHILD_TYPE leftChild,
+            RIGHT_CHILD_TYPE rightChild,
+            JoinReorderContext joinReorderContext) {
+        this(joinType, hashJoinConjuncts, otherJoinConjuncts, hint,
+                Optional.empty(), Optional.empty(), leftChild, rightChild);
+        this.joinReorderContext.copyFrom(joinReorderContext);
+    }
+
+    public LogicalJoin(
+            JoinType joinType,
+            List<Expression> hashJoinConjuncts,
+            List<Expression> otherJoinConjuncts,
+            JoinHint hint,
+            Optional<GroupExpression> groupExpression,
+            Optional<LogicalProperties> logicalProperties,
+            LEFT_CHILD_TYPE leftChild,
+            RIGHT_CHILD_TYPE rightChild,
+            JoinReorderContext joinReorderContext) {
+        this(joinType, hashJoinConjuncts, otherJoinConjuncts, hint, groupExpression, logicalProperties, leftChild,
                 rightChild);
         this.joinReorderContext.copyFrom(joinReorderContext);
     }
@@ -88,24 +124,25 @@ public class LogicalJoin<LEFT_CHILD_TYPE extends Plan, RIGHT_CHILD_TYPE extends 
      * Constructor for LogicalJoinPlan.
      *
      * @param joinType logical type for join
-     * @param condition on clause for join node
      */
-    public LogicalJoin(JoinType joinType, List<Expression> hashJoinConjuncts, Optional<Expression> condition,
-            Optional<GroupExpression> groupExpression, Optional<LogicalProperties> logicalProperties,
-            LEFT_CHILD_TYPE leftChild, RIGHT_CHILD_TYPE rightChild) {
+    public LogicalJoin(
+            JoinType joinType,
+            List<Expression> hashJoinConjuncts,
+            List<Expression> otherJoinConjuncts,
+            JoinHint hint,
+            Optional<GroupExpression> groupExpression,
+            Optional<LogicalProperties> logicalProperties,
+            LEFT_CHILD_TYPE leftChild,
+            RIGHT_CHILD_TYPE rightChild) {
         super(PlanType.LOGICAL_JOIN, groupExpression, logicalProperties, leftChild, rightChild);
         this.joinType = Objects.requireNonNull(joinType, "joinType can not be null");
-        this.hashJoinConjuncts = hashJoinConjuncts;
-        this.otherJoinCondition = Objects.requireNonNull(condition, "condition can not be null");
+        this.hashJoinConjuncts = ImmutableList.copyOf(hashJoinConjuncts);
+        this.otherJoinConjuncts = ImmutableList.copyOf(otherJoinConjuncts);
+        this.hint = Objects.requireNonNull(hint, "hint can not be null");
     }
 
-    /**
-     * get combination of hashJoinConjuncts and condition
-     *
-     * @return combine hashJoinConjuncts and condition by AND
-     */
-    public Optional<Expression> getOtherJoinCondition() {
-        return otherJoinCondition;
+    public List<Expression> getOtherJoinConjuncts() {
+        return otherJoinConjuncts;
     }
 
     @Override
@@ -113,24 +150,16 @@ public class LogicalJoin<LEFT_CHILD_TYPE extends Plan, RIGHT_CHILD_TYPE extends 
         return hashJoinConjuncts;
     }
 
-    /**
-     * hashJoinConjuncts and otherJoinCondition
-     *
-     * @return the combination of hashJoinConjuncts and otherJoinCondition
-     */
     public Optional<Expression> getOnClauseCondition() {
-        Optional<Expression> hashJoinCondition = ExpressionUtils.optionalAnd(hashJoinConjuncts);
-
-        if (hashJoinCondition.isPresent() && otherJoinCondition.isPresent()) {
-            return ExpressionUtils.optionalAnd(hashJoinCondition.get(), otherJoinCondition.get());
-        }
-
-        return hashJoinCondition.map(Optional::of)
-                .orElse(otherJoinCondition);
+        return ExpressionUtils.optionalAnd(hashJoinConjuncts, otherJoinConjuncts);
     }
 
     public JoinType getJoinType() {
         return joinType;
+    }
+
+    public JoinHint getHint() {
+        return hint;
     }
 
     @Override
@@ -145,6 +174,7 @@ public class LogicalJoin<LEFT_CHILD_TYPE extends Plan, RIGHT_CHILD_TYPE extends 
         switch (joinType) {
             case LEFT_SEMI_JOIN:
             case LEFT_ANTI_JOIN:
+            case NULL_AWARE_LEFT_ANTI_JOIN:
                 return ImmutableList.copyOf(left().getOutput());
             case RIGHT_SEMI_JOIN:
             case RIGHT_ANTI_JOIN:
@@ -174,15 +204,19 @@ public class LogicalJoin<LEFT_CHILD_TYPE extends Plan, RIGHT_CHILD_TYPE extends 
 
     @Override
     public String toString() {
-        return Utils.toSqlString("LogicalJoin",
+        List<Object> args = Lists.newArrayList(
                 "type", joinType,
-                "hashJoinCondition", hashJoinConjuncts,
-                "otherJoinCondition", otherJoinCondition
-        );
+                "hashJoinConjuncts", hashJoinConjuncts,
+                "otherJoinConjuncts", otherJoinConjuncts);
+        if (hint != JoinHint.NONE) {
+            args.add("hint");
+            args.add(hint);
+        }
+        return Utils.toSqlString("LogicalJoin", args.toArray());
     }
 
     // TODO:
-    // 1. consider the order of conjucts in otherJoinCondition and hashJoinConditions
+    // 1. consider the order of conjuncts in otherJoinConjuncts and hashJoinConjuncts
     @Override
     public boolean equals(Object o) {
         if (this == o) {
@@ -197,12 +231,13 @@ public class LogicalJoin<LEFT_CHILD_TYPE extends Plan, RIGHT_CHILD_TYPE extends 
                 // TODO: why use containsAll?
                 && that.getHashJoinConjuncts().containsAll(hashJoinConjuncts)
                 && hashJoinConjuncts.containsAll(that.getHashJoinConjuncts())
-                && Objects.equals(otherJoinCondition, that.otherJoinCondition);
+                && Objects.equals(otherJoinConjuncts, that.otherJoinConjuncts)
+                && hint.equals(that.hint);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(joinType, otherJoinCondition);
+        return Objects.hash(joinType, hashJoinConjuncts, otherJoinConjuncts);
     }
 
     @Override
@@ -212,10 +247,10 @@ public class LogicalJoin<LEFT_CHILD_TYPE extends Plan, RIGHT_CHILD_TYPE extends 
 
     @Override
     public List<? extends Expression> getExpressions() {
-        Builder<Expression> builder = new Builder<Expression>()
-                .addAll(hashJoinConjuncts);
-        otherJoinCondition.ifPresent(builder::add);
-        return builder.build();
+        return new Builder<Expression>()
+                .addAll(hashJoinConjuncts)
+                .addAll(otherJoinConjuncts)
+                .build();
     }
 
     public JoinReorderContext getJoinReorderContext() {
@@ -225,19 +260,19 @@ public class LogicalJoin<LEFT_CHILD_TYPE extends Plan, RIGHT_CHILD_TYPE extends 
     @Override
     public LogicalBinary<Plan, Plan> withChildren(List<Plan> children) {
         Preconditions.checkArgument(children.size() == 2);
-        return new LogicalJoin<>(joinType, hashJoinConjuncts, otherJoinCondition, children.get(0), children.get(1),
-                joinReorderContext);
+        return new LogicalJoin<>(joinType, hashJoinConjuncts, otherJoinConjuncts, hint, children.get(0),
+                children.get(1), joinReorderContext);
     }
 
     @Override
     public Plan withGroupExpression(Optional<GroupExpression> groupExpression) {
-        return new LogicalJoin<>(joinType, hashJoinConjuncts, otherJoinCondition, groupExpression,
+        return new LogicalJoin<>(joinType, hashJoinConjuncts, otherJoinConjuncts, hint, groupExpression,
                 Optional.of(getLogicalProperties()), left(), right(), joinReorderContext);
     }
 
     @Override
     public Plan withLogicalProperties(Optional<LogicalProperties> logicalProperties) {
-        return new LogicalJoin<>(joinType, hashJoinConjuncts, otherJoinCondition,
+        return new LogicalJoin<>(joinType, hashJoinConjuncts, otherJoinConjuncts, hint,
                 Optional.empty(), logicalProperties, left(), right(), joinReorderContext);
     }
 
@@ -250,4 +285,26 @@ public class LogicalJoin<LEFT_CHILD_TYPE extends Plan, RIGHT_CHILD_TYPE extends 
     public RIGHT_CHILD_TYPE right() {
         return (RIGHT_CHILD_TYPE) child(1);
     }
+
+    public LogicalJoin withHashJoinConjuncts(List<Expression> hashJoinConjuncts) {
+        return new LogicalJoin<>(
+                joinType, hashJoinConjuncts, this.otherJoinConjuncts, hint, left(), right(), joinReorderContext);
+    }
+
+    public LogicalJoin withhashJoinConjunctsAndChildren(List<Expression> hashJoinConjuncts, List<Plan> children) {
+        Preconditions.checkArgument(children.size() == 2);
+        return new LogicalJoin<>(joinType, hashJoinConjuncts, otherJoinConjuncts, hint, children.get(0),
+                children.get(1), joinReorderContext);
+    }
+
+    public LogicalJoin withJoinType(JoinType joinType) {
+        return new LogicalJoin<>(joinType, hashJoinConjuncts, otherJoinConjuncts, hint, left(), right(),
+                joinReorderContext);
+    }
+
+    public LogicalJoin withOtherJoinConjuncts(List<Expression> otherJoinConjuncts) {
+        return new LogicalJoin<>(joinType, hashJoinConjuncts, otherJoinConjuncts, hint, left(), right(),
+                joinReorderContext);
+    }
 }
+

@@ -22,12 +22,16 @@ import org.apache.doris.analysis.Expr;
 import org.apache.doris.analysis.ImportColumnDesc;
 import org.apache.doris.analysis.IntLiteral;
 import org.apache.doris.analysis.SlotRef;
+import org.apache.doris.analysis.TupleDescriptor;
 import org.apache.doris.catalog.Column;
+import org.apache.doris.catalog.HdfsResource;
+import org.apache.doris.catalog.OlapTable;
+import org.apache.doris.catalog.TableIf;
 import org.apache.doris.common.DdlException;
 import org.apache.doris.common.FeConstants;
 import org.apache.doris.common.MetaNotFoundException;
 import org.apache.doris.common.UserException;
-import org.apache.doris.common.util.BrokerUtil;
+import org.apache.doris.common.util.Util;
 import org.apache.doris.common.util.VectorizedUtil;
 import org.apache.doris.load.BrokerFileGroup;
 import org.apache.doris.load.Load;
@@ -55,10 +59,12 @@ import java.util.Map;
 
 public class LoadScanProvider implements FileScanProviderIf {
 
-    FileGroupInfo fileGroupInfo;
+    private FileGroupInfo fileGroupInfo;
+    private TupleDescriptor destTupleDesc;
 
-    public LoadScanProvider(FileGroupInfo fileGroupInfo) {
+    public LoadScanProvider(FileGroupInfo fileGroupInfo, TupleDescriptor destTupleDesc) {
         this.fileGroupInfo = fileGroupInfo;
+        this.destTupleDesc = destTupleDesc;
     }
 
     @Override
@@ -89,19 +95,23 @@ public class LoadScanProvider implements FileScanProviderIf {
     @Override
     public ParamCreateContext createContext(Analyzer analyzer) throws UserException {
         ParamCreateContext ctx = new ParamCreateContext();
+        ctx.destTupleDescriptor = destTupleDesc;
         ctx.fileGroup = fileGroupInfo.getFileGroup();
         ctx.timezone = analyzer.getTimezone();
 
         TFileScanRangeParams params = new TFileScanRangeParams();
+        params.setFormatType(formatType(fileGroupInfo.getFileGroup().getFileFormat(), ""));
+        params.setCompressType(fileGroupInfo.getFileGroup().getCompressType());
         params.setStrictMode(fileGroupInfo.isStrictMode());
         params.setProperties(fileGroupInfo.getBrokerDesc().getProperties());
         if (fileGroupInfo.getBrokerDesc().getFileType() == TFileType.FILE_HDFS) {
-            THdfsParams tHdfsParams = BrokerUtil.generateHdfsParam(fileGroupInfo.getBrokerDesc().getProperties());
+            THdfsParams tHdfsParams = HdfsResource.generateHdfsParam(fileGroupInfo.getBrokerDesc().getProperties());
             params.setHdfsParams(tHdfsParams);
         }
         TFileAttributes fileAttributes = new TFileAttributes();
         setFileAttributes(ctx.fileGroup, fileAttributes);
         params.setFileAttributes(fileAttributes);
+        params.setFileType(fileGroupInfo.getFileType());
         ctx.params = params;
 
         initColumns(ctx, analyzer);
@@ -121,6 +131,7 @@ public class LoadScanProvider implements FileScanProviderIf {
         fileAttributes.setReadJsonByLine(fileGroup.isReadJsonByLine());
         fileAttributes.setReadByColumnDef(true);
         fileAttributes.setHeaderType(getHeaderType(fileGroup.getFileFormat()));
+        fileAttributes.setTrimDoubleQuotes(fileGroup.getTrimDoubleQuotes());
     }
 
     private String getHeaderType(String formatType) {
@@ -167,7 +178,7 @@ public class LoadScanProvider implements FileScanProviderIf {
      */
     private void initColumns(ParamCreateContext context, Analyzer analyzer) throws UserException {
         context.srcTupleDescriptor = analyzer.getDescTbl().createTupleDescriptor();
-        context.slotDescByName = Maps.newTreeMap(String.CASE_INSENSITIVE_ORDER);
+        context.srcSlotDescByName = Maps.newTreeMap(String.CASE_INSENSITIVE_ORDER);
         context.exprMap = Maps.newTreeMap(String.CASE_INSENSITIVE_ORDER);
 
         // for load job, column exprs is got from file group
@@ -182,19 +193,28 @@ public class LoadScanProvider implements FileScanProviderIf {
             columnDescs.descs.add(ImportColumnDesc.newDeleteSignImportColumnDesc(new IntLiteral(1)));
         }
         // add columnExpr for sequence column
-        if (context.fileGroup.hasSequenceCol()) {
-            columnDescs.descs.add(
-                    new ImportColumnDesc(Column.SEQUENCE_COL, new SlotRef(null, context.fileGroup.getSequenceCol())));
+        TableIf targetTable = getTargetTable();
+        if (targetTable instanceof OlapTable && ((OlapTable) targetTable).hasSequenceCol()) {
+            String sequenceCol = ((OlapTable) targetTable).getSequenceMapCol();
+            if (sequenceCol == null) {
+                sequenceCol = context.fileGroup.getSequenceCol();
+            }
+            columnDescs.descs.add(new ImportColumnDesc(Column.SEQUENCE_COL,
+                    new SlotRef(null, sequenceCol)));
         }
         List<Integer> srcSlotIds = Lists.newArrayList();
         Load.initColumns(fileGroupInfo.getTargetTable(), columnDescs, context.fileGroup.getColumnToHadoopFunction(),
-                context.exprMap, analyzer, context.srcTupleDescriptor, context.slotDescByName, srcSlotIds,
+                context.exprMap, analyzer, context.srcTupleDescriptor, context.srcSlotDescByName, srcSlotIds,
                 formatType(context.fileGroup.getFileFormat(), ""), null, VectorizedUtil.isVectorized());
 
-        int numColumnsFromFile = srcSlotIds.size() - context.fileGroup.getColumnNamesFromPath().size();
+        int columnCountFromPath = 0;
+        if (context.fileGroup.getColumnNamesFromPath() != null) {
+            columnCountFromPath = context.fileGroup.getColumnNamesFromPath().size();
+        }
+        int numColumnsFromFile = srcSlotIds.size() - columnCountFromPath;
         Preconditions.checkState(numColumnsFromFile >= 0,
                 "srcSlotIds.size is: " + srcSlotIds.size() + ", num columns from path: "
-                        + context.fileGroup.getColumnNamesFromPath().size());
+                        + columnCountFromPath);
         context.params.setNumOfColumnsFromFile(numColumnsFromFile);
         for (int i = 0; i < srcSlotIds.size(); ++i) {
             TFileScanSlotInfo slotInfo = new TFileScanSlotInfo();
@@ -222,23 +242,15 @@ public class LoadScanProvider implements FileScanProviderIf {
             } else {
                 throw new UserException("Not supported file format: " + fileFormat);
             }
-        }
-
-        String lowerCasePath = path.toLowerCase();
-        if (lowerCasePath.endsWith(".parquet") || lowerCasePath.endsWith(".parq")) {
-            return TFileFormatType.FORMAT_PARQUET;
-        } else if (lowerCasePath.endsWith(".gz")) {
-            return TFileFormatType.FORMAT_CSV_GZ;
-        } else if (lowerCasePath.endsWith(".bz2")) {
-            return TFileFormatType.FORMAT_CSV_BZ2;
-        } else if (lowerCasePath.endsWith(".lz4")) {
-            return TFileFormatType.FORMAT_CSV_LZ4FRAME;
-        } else if (lowerCasePath.endsWith(".lzo")) {
-            return TFileFormatType.FORMAT_CSV_LZOP;
-        } else if (lowerCasePath.endsWith(".deflate")) {
-            return TFileFormatType.FORMAT_CSV_DEFLATE;
         } else {
-            return TFileFormatType.FORMAT_CSV_PLAIN;
+            // get file format by the suffix of file
+            return Util.getFileFormatType(path);
         }
     }
+
+    @Override
+    public TableIf getTargetTable() {
+        return fileGroupInfo.getTargetTable();
+    }
 }
+

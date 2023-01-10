@@ -45,7 +45,6 @@ public:
     void init_from_pb(const ColumnPB& column);
     void init_from_thrift(const TColumn& column);
     void to_schema_pb(ColumnPB* column) const;
-    uint32_t mem_size() const;
 
     int32_t unique_id() const { return _unique_id; }
     std::string name() const { return _col_name; }
@@ -70,8 +69,11 @@ public:
                                                             std::string suffix) const;
     int precision() const { return _precision; }
     int frac() const { return _frac; }
-    bool visible() const { return _visible; }
-    // Add a sub column.
+    inline bool visible() const { return _visible; }
+
+    /**
+     * Add a sub column.
+     */
     void add_sub_column(TabletColumn& sub_column);
 
     uint32_t get_subtype_count() const { return _sub_column_count; }
@@ -117,6 +119,42 @@ private:
 bool operator==(const TabletColumn& a, const TabletColumn& b);
 bool operator!=(const TabletColumn& a, const TabletColumn& b);
 
+class TabletSchema;
+
+class TabletIndex {
+public:
+    void init_from_thrift(const TOlapTableIndex& index, const TabletSchema& tablet_schema);
+    void init_from_pb(const TabletIndexPB& index);
+    void to_schema_pb(TabletIndexPB* index) const;
+
+    const int64_t index_id() const { return _index_id; }
+    const std::string& index_name() const { return _index_name; }
+    const IndexType index_type() const { return _index_type; }
+    const vector<int32_t>& col_unique_ids() const { return _col_unique_ids; }
+    const std::map<string, string>& properties() const { return _properties; }
+    int32_t get_gram_size() const {
+        if (_properties.count("gram_size")) {
+            return std::stoi(_properties.at("gram_size"));
+        }
+
+        return 0;
+    }
+    int32_t get_gram_bf_size() const {
+        if (_properties.count("bf_size")) {
+            return std::stoi(_properties.at("bf_size"));
+        }
+
+        return 0;
+    }
+
+private:
+    int64_t _index_id;
+    std::string _index_name;
+    IndexType _index_type;
+    std::vector<int32_t> _col_unique_ids;
+    std::map<string, string> _properties;
+};
+
 class TabletSchema {
 public:
     // TODO(yingchun): better to make constructor as private to avoid
@@ -128,7 +166,7 @@ public:
     void append_column(TabletColumn column, bool is_dropped_column = false);
     void copy_from(const TabletSchema& tablet_schema);
     std::string to_key() const;
-    uint32_t mem_size() const;
+    int64_t mem_size() const { return _mem_size; };
 
     size_t row_size() const;
     int32_t field_index(const std::string& field_name) const;
@@ -160,6 +198,14 @@ public:
     bool has_sequence_col() const { return _sequence_col_idx != -1; }
     int32_t sequence_col_idx() const { return _sequence_col_idx; }
     segment_v2::CompressionTypePB compression_type() const { return _compression_type; }
+
+    const std::vector<TabletIndex>& indexes() const { return _indexes; }
+    std::vector<const TabletIndex*> get_indexes_for_column(int32_t col_unique_id) const;
+    bool has_inverted_index(int32_t col_unique_id) const;
+    const TabletIndex* get_inverted_index(int32_t col_unique_id) const;
+    bool has_ngram_bf_index(int32_t col_unique_id) const;
+    const TabletIndex* get_ngram_bf_index(int32_t col_unique_id) const;
+    void update_indexes_from_thrift(const std::vector<doris::TOlapTableIndex>& indexes);
 
     int32_t schema_version() const { return _schema_version; }
     void clear_columns();
@@ -196,6 +242,7 @@ private:
     SortType _sort_type = SortType::LEXICAL;
     size_t _sort_col_num = 0;
     std::vector<TabletColumn> _cols;
+    std::vector<TabletIndex> _indexes;
     std::unordered_map<std::string, int32_t> _field_name_to_index;
     std::unordered_map<int32_t, int32_t> _field_id_to_index;
     size_t _num_columns = 0;
@@ -214,6 +261,7 @@ private:
     int32_t _sequence_col_idx = -1;
     int32_t _schema_version = -1;
     bool _disable_auto_compaction = false;
+    int64_t _mem_size = 0;
 };
 
 bool operator==(const TabletSchema& a, const TabletSchema& b);

@@ -267,6 +267,11 @@ public class IntLiteral extends LiteralExpr {
     }
 
     @Override
+    public String getStringValueForArray() {
+        return "\"" + getStringValue() + "\"";
+    }
+
+    @Override
     public long getLongValue() {
         return value;
     }
@@ -306,7 +311,9 @@ public class IntLiteral extends LiteralExpr {
         } else if (targetType.isFloatingPointType()) {
             return new FloatLiteral(new Double(value), targetType);
         } else if (targetType.isDecimalV2() || targetType.isDecimalV3()) {
-            return new DecimalLiteral(new BigDecimal(value));
+            DecimalLiteral res = new DecimalLiteral(new BigDecimal(value));
+            res.setType(targetType);
+            return res;
         }
         return this;
     }

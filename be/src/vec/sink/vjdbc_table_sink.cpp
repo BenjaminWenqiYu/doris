@@ -17,7 +17,6 @@
 
 #include "vec/sink/vjdbc_table_sink.h"
 
-#ifdef LIBJVM
 #include <gen_cpp/DataSinks_types.h>
 
 #include <sstream>
@@ -45,6 +44,7 @@ Status VJdbcTableSink::init(const TDataSink& t_sink) {
     _jdbc_param.driver_path = t_jdbc_sink.jdbc_table.jdbc_driver_url;
     _jdbc_param.driver_checksum = t_jdbc_sink.jdbc_table.jdbc_driver_checksum;
     _jdbc_param.resource_name = t_jdbc_sink.jdbc_table.jdbc_resource_name;
+    _jdbc_param.table_type = t_jdbc_sink.table_type;
     _table_name = t_jdbc_sink.jdbc_table.jdbc_table_name;
     _use_transaction = t_jdbc_sink.use_transaction;
 
@@ -57,7 +57,7 @@ Status VJdbcTableSink::open(RuntimeState* state) {
 
     // create writer
     _writer.reset(new JdbcConnector(_jdbc_param));
-    RETURN_IF_ERROR(_writer->open());
+    RETURN_IF_ERROR(_writer->open(state, false));
     if (_use_transaction) {
         RETURN_IF_ERROR(_writer->begin_trans());
     }
@@ -66,7 +66,7 @@ Status VJdbcTableSink::open(RuntimeState* state) {
     return Status::OK();
 }
 
-Status VJdbcTableSink::send(RuntimeState* state, Block* block) {
+Status VJdbcTableSink::send(RuntimeState* state, Block* block, bool eos) {
     INIT_AND_SCOPE_SEND_SPAN(state->get_tracer(), _send_span, "VJdbcTableSink::send");
     Status status = Status::OK();
     if (block == nullptr || block->rows() == 0) {
@@ -81,7 +81,7 @@ Status VJdbcTableSink::send(RuntimeState* state, Block* block) {
     uint32_t num_row_sent = 0;
     while (start_send_row < output_block.rows()) {
         RETURN_IF_ERROR(_writer->append(_table_name, &output_block, _output_vexpr_ctxs,
-                                        start_send_row, &num_row_sent));
+                                        start_send_row, &num_row_sent, _jdbc_param.table_type));
         start_send_row += num_row_sent;
         num_row_sent = 0;
     }
@@ -95,8 +95,8 @@ Status VJdbcTableSink::close(RuntimeState* state, Status exec_status) {
     if (exec_status.ok() && _use_transaction) {
         RETURN_IF_ERROR(_writer->finish_trans());
     }
+    RETURN_IF_ERROR(_writer->close());
     return DataSink::close(state, exec_status);
 }
 } // namespace vectorized
 } // namespace doris
-#endif

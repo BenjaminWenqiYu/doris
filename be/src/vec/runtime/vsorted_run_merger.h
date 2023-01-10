@@ -19,13 +19,10 @@
 
 #include <queue>
 
-#include "common/object_pool.h"
-#include "util/tuple_row_compare.h"
 #include "vec/core/sort_cursor.h"
 
 namespace doris {
 
-class RowBatch;
 class RuntimeProfile;
 
 namespace vectorized {
@@ -56,11 +53,6 @@ public:
     // Return the next block of sorted rows from this merger.
     Status get_next(Block* output_block, bool* eos);
 
-    // Do not support now
-    virtual Status get_batch(RowBatch** output_batch) {
-        return Status::InternalError("no support method get_batch(RowBatch** output_batch)");
-    }
-
 protected:
     const std::vector<VExprContext*>& _ordering_expr;
     const std::vector<bool>& _is_asc_order;
@@ -72,7 +64,7 @@ protected:
     size_t _offset = 0;
 
     std::vector<ReceiveQueueSortCursorImpl> _cursors;
-    std::priority_queue<SortCursor> _priority_queue;
+    std::priority_queue<MergeSortCursor> _priority_queue;
 
     Block _empty_block;
 
@@ -83,8 +75,8 @@ protected:
     RuntimeProfile::Counter* _get_next_block_timer;
 
 private:
-    void next_heap(SortCursor& current);
-    bool has_next_block(SortCursor& current);
+    void next_heap(MergeSortCursor& current);
+    bool has_next_block(MergeSortCursor& current);
 };
 
 } // namespace vectorized

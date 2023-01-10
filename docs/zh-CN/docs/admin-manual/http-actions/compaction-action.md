@@ -72,7 +72,7 @@ curl -X GET http://be_host:webserver_port/api/compaction/show?tablet_id=xxxx
 
 ```
 {
-    "cumulative policy type": "NUM_BASED",
+    "cumulative policy type": "SIZE_BASED",
     "cumulative point": 50,
     "last cumulative failure time": "2019-12-16 18:13:43.224",
     "last base failure time": "2019-12-16 18:13:23.320",
@@ -119,7 +119,7 @@ curl -X GET http://192.168.10.24:8040/api/compaction/show?tablet_id=10015
 ## 手动触发 Compaction
 
 ```
-curl -X POST http://be_host:webserver_port/api/compaction/run?tablet_id=xxxx&compact_type=cumulative
+curl -X POST http://be_host:webserver_port/api/compaction/run?tablet_id=xxxx\&compact_type=cumulative
 ```
 
 当前仅能执行一个手动compaction任务，其中compact_type取值为base或cumulative
